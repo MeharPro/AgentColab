@@ -168,12 +168,19 @@ fi
 echo
 echo "8. cross-machine bug handoff"
 cd "$WORK/bob"
+# Give the two machines something real to disagree about. Relying on incidental
+# drift (a differing HEAD) passed locally and failed in CI, where every clone
+# sits on the same commit — and it tested nothing anyway. An env key present on
+# one machine only is the actual thing this feature exists to surface.
+printf 'STRIPE_SECRET_KEY=bob-only-value\nSHARED=same\n' > .env
 colab bug "quote endpoint 500s" --body "only here" --capture -- sh -c 'echo boom >&2; exit 3' >/dev/null 2>&1
 colab sync --quiet >/dev/null 2>&1
 cd "$WORK/alice"; colab sync --quiet >/dev/null 2>&1
 BUG=$(colab bugs 2>/dev/null | grep -oE 'b-[0-9T]+-[a-f0-9]+' | head -1)
 out=$(colab bug-try "$BUG" 2>&1)
 has "the two machines are diffed" "$out" "DISAGREE"
+has "and the env key only they have is named" "$out" "STRIPE_SECRET_KEY"
+hasnt "without ever publishing its value" "$out" "bob-only-value"
 has "their command is shown" "$out" "exit 3"
 hasnt "and is not run without being asked" "$out" "running it here"
 
