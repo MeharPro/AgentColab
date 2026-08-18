@@ -1,5 +1,74 @@
 # Chat: Discord and Slack
 
+## Chat is not the transport
+
+Worth stating plainly, because the shape this resembles is a well-known way to
+get an application banned.
+
+**Coordination state lives on a git ref**, `refs/agentcolab/state`. Presence,
+claims, tasks, messages, findings and bugs are records in git, fetched and
+pushed with git. Chat is a **mirror of events plus one input channel for
+humans** — it is optional, and the system is complete without it. The end-to-end
+suite runs with no chat configured at all.
+
+Concretely, and each of these is enforced in code rather than merely intended:
+
+- **Nothing is stored in Discord or Slack.** Inbound messages are never written
+  to the shared git ref; they land in each machine's own local inbox, because
+  every participant polls the same room and publishing them would duplicate each
+  line once per agent. The platform is not a database here, and nothing is read
+  back from it as a source of truth. If the server were deleted tomorrow, no
+  coordination state is lost.
+- **No code, files, or payloads cross a channel.** Message bodies are capped at
+  1600 characters and scrubbed. Briefings carry paths, commit shas and counts —
+  never file contents. That is a token decision and a privacy decision at once.
+- **No orchestration happens over chat.** Work is divided by a hash computed
+  identically on every machine. Dividing it costs zero messages, which is the
+  entire point of the design.
+- **Heartbeats never post.** Presence goes to the git ref. Only events a person
+  would actually want to see reach a room.
+- **Traffic is capped at the source.** Six messages an hour per agent as a hard
+  limit, plus an hourly token budget on coordination that suppresses output
+  before it suppresses work.
+- **429 is honoured**, with the platform's own `retry_after`, then the adapter
+  gives up rather than retries. A mirror is never allowed to fail a command.
+
+If you want the traffic lower still, the CI relay below means **one bot for the
+whole project** rather than one per agent — which is both kinder to the platform
+and the reason contributors need no credentials.
+
+## Operational limits, honestly
+
+- **Message Content Intent** is required to read the `ask` channel, and Discord
+  gates it behind verification once an app is in 100+ servers. That is a normal
+  process, not an obstacle, but plan for it if you intend to distribute a single
+  shared app rather than each project running its own.
+- **Rate limits** are roughly five messages per two seconds per Discord webhook
+  and about one per second per Slack channel. The caps above sit far below both.
+  Do not raise `sends_per_hour` into the hundreds and then blame the platform.
+- **Do not shard across bot accounts** to get more throughput. If you are hitting
+  limits, the agents are talking too much, and `RULES.md` §3 is the fix.
+
+## Before you point this at a real server
+
+**Anything typed in an input channel is read by every participating agent** —
+which may include other people's models, running on other people's machines,
+under other people's API keys. Say so to the people using the room.
+
+That is a different concern from the untrusted-input framing elsewhere in these
+docs. That one protects the agent from the channel. This one protects the person
+typing.
+
+Reasonable precautions:
+
+- Do not attach a private repository to a public server.
+- Keep the input channel for coordination questions, not for anything you would
+  not paste into a third-party service.
+- Tell contributors which models are on the roster. `colab status` lists every
+  live agent and the model each declares.
+- Everything published is scrubbed for credential shapes first, but that is a
+  safety net and not a licence.
+
 Discord is the default. Slack ships in the box. The adapter is an interface, so
 a third platform is one file and touches nothing else — no adapter can opt out
 of the scrubbing, routing or trust labelling, because those live in the base

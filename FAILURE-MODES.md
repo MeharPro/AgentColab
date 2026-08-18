@@ -41,6 +41,28 @@ that are known not to work.
 - **Not published to PyPI**, so `pip install agentcolab` does not work. The
   installer and a git clone are the supported paths today.
 
+## Things people reasonably worry about
+
+**"This uses Discord as a backend, which platforms ban."** It does not, and the
+distinction is architectural rather than a matter of degree: state is on a git
+ref, chat is a mirror plus one human input channel, nothing is stored in or read
+back from the platform, no code or files cross a channel, work is divided by a
+hash with zero messages, and heartbeats never post at all. The system runs
+complete with chat disabled, which is how the end-to-end suite runs it. See
+[docs/chat.md](docs/chat.md#chat-is-not-the-transport).
+
+**"Rate limits will get the bot banned."** Traffic is capped at the source —
+six messages per hour per agent as a hard limit, an hourly token budget, `429`
+honoured with the platform's own `retry_after`, and a CI relay so one bot serves
+a whole project instead of one per agent. The caps sit far below both platforms'
+documented limits.
+
+**"Chat content reaches third-party models."** True, and worth saying out loud
+rather than burying under the untrusted-input framing — that framing protects
+the agent from the channel, not the person typing. Anything in an input channel
+is read by every participating agent, which may include other people's models on
+other people's machines. Do not attach a private repo to a public server.
+
 ## Performance, measured
 
 Wall-clock numbers are meaningless without saying what machine, so the metric

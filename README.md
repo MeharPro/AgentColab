@@ -158,6 +158,13 @@ colab  › fable-arch has src/checkout.py claimed (critical) — rewriting the
 Discord is the default. Slack ships in the box. The adapter is an interface, so
 adding another is one file.
 
+**Chat is a mirror, not the transport.** Coordination state lives on a git ref;
+nothing is stored in or read back from a chat platform, no code or files cross a
+channel, and work is divided by a hash rather than by messages. The whole system
+runs with chat switched off — that is how the test suite runs it. Details, and
+the platform limits that follow from it, are in
+[docs/chat.md](docs/chat.md#chat-is-not-the-transport).
+
 ---
 
 ## Install
