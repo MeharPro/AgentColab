@@ -32,11 +32,37 @@ REFRESH_AFTER_SECONDS = 180
 # ---------------------------------------------------------------- presence
 
 
+DEEP_FINGERPRINT_TTL = 24 * 3600
+
+
+def deep_fingerprint(store: Store, *, force: bool = False) -> dict[str, Any]:
+    """The full machine fingerprint, cached on disk for a day.
+
+    Toolchain versions and lockfile hashes are what a cross-machine bug report
+    needs, and they cost a second or two to collect even probed concurrently.
+    They also change about as often as you upgrade Node. So it is computed when
+    something actually needs it -- filing a bug, or a daily refresh -- and never
+    on the path a person is waiting on.
+    """
+    from .store import read_json, write_json
+    cache = store.cache / "fingerprint.json"
+    if not force:
+        blob = read_json(cache)
+        if isinstance(blob, dict):
+            stamp = parse_iso(blob.get("at"))
+            if stamp and (now() - stamp).total_seconds() < DEEP_FINGERPRINT_TTL:
+                return blob.get("data") or {}
+    data = records.scrub_deep(records.fingerprint(store.repo_root, deep=True))
+    write_json(cache, {"at": iso(), "data": data})
+    return data
+
+
 def heartbeat_payload(store: Store, *, intent: str | None = None,
                       deep: bool = False) -> dict[str, Any]:
     config = store.config()
     existing = store.view().get(f"agents/{store.agent}.json") or {}
-    finger = records.fingerprint(store.repo_root, deep=deep)
+    finger = (deep_fingerprint(store) if deep
+              else records.fingerprint(store.repo_root, deep=False))
     payload: dict[str, Any] = {
         "agent": store.agent,
         "machine_id": config.get("machine_id"),

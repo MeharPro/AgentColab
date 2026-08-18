@@ -404,16 +404,28 @@ def detect_github_login(repo_root: Path | None = None) -> str:
     env = os.environ.get("AGENTCOLAB_GITHUB_LOGIN")
     if env:
         return records.slug(env, limit=39)
-    if shutil.which("gh"):
-        raw = records.run(["gh", "api", "user", "--jq", ".login"], timeout=12)
-        if raw and "\n" not in raw and not raw.startswith("{"):
-            return records.slug(raw, limit=39)
+    # Local sources first. `gh api user` is a network round trip that cost ~3s
+    # on the join path, and a fork URL usually answers the same question for
+    # free. `gh` is the fallback, not the first resort.
+    urls: list[str] = []
     if repo_root:
-        for remote in ("fork", "mine", "origin"):
-            url = records.run(["git", "-C", str(repo_root), "remote", "get-url", remote])
+        out = records.run(["git", "-C", str(repo_root), "remote", "-v"], timeout=5)
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                urls.append(parts[1])
+        for url in urls:
             login = github_login_from_url(url)
             if login:
                 return login
+    # `gh api user` is a network round trip that cost six seconds on the join
+    # path. It is only worth paying when this repository is actually on GitHub
+    # and the URL did not already answer the question -- on a GitLab or local
+    # remote it can only ever come back empty.
+    if any("github.com" in u for u in urls) and shutil.which("gh"):
+        raw = records.run(["gh", "api", "user", "--jq", ".login"], timeout=6)
+        if raw and "\n" not in raw and not raw.startswith("{"):
+            return records.slug(raw, limit=39)
     return ""
 
 

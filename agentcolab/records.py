@@ -345,8 +345,32 @@ _run = run  # historical alias
 def _tool_version(binary: str, args: tuple[str, ...]) -> str:
     if not shutil.which(binary):
         return "missing"
-    out = run([binary, *args])
+    # Two seconds is generous for `--version`. Some of these are startlingly
+    # slow -- pnpm took 6.2s on the machine this was profiled on, npm 2.5s,
+    # java 2.4s -- and a version string is never worth making a person wait.
+    out = run([binary, *args], timeout=2)
     return out.splitlines()[0].strip() if out else "unknown"
+
+
+def toolchain(workers: int = 8) -> dict[str, str]:
+    """Every runtime version, probed concurrently.
+
+    Serially this was the single slowest thing in the tool: fourteen
+    subprocesses, several of them multi-second, adding about eight seconds to
+    anything that wanted a machine fingerprint. Concurrently the wall time is
+    the slowest single probe, and they are all bounded at two seconds.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {label: pool.submit(_tool_version, binary, args)
+                   for label, binary, args in TOOLCHAIN}
+        out = {}
+        for label, future in futures.items():
+            try:
+                out[label] = future.result(timeout=5)
+            except Exception:
+                out[label] = "unknown"
+        return out
 
 
 # Every runtime worth diffing across machines. Missing ones report "missing",
@@ -449,9 +473,7 @@ def fingerprint(repo_root: Path, *, deep: bool = False) -> dict[str, Any]:
     dirty = run(["git", "-C", root, "status", "--porcelain"], timeout=15)
     data["dirty_files"] = len([line for line in dirty.splitlines() if line.strip()])
     if deep:
-        data["toolchain"] = {
-            label: _tool_version(binary, args) for label, binary, args in TOOLCHAIN
-        }
+        data["toolchain"] = toolchain()
         data["env_keys"] = env_key_shape(repo_root)
         locks: dict[str, str] = {}
         for name in LOCKFILES:
@@ -525,26 +547,32 @@ def diff_fingerprints(mine: dict[str, Any], theirs: dict[str, Any]) -> list[str]
 MAX_SURFACE = 400
 
 
-def resolve_base_ref(repo_root: Path, preferred: str | None = None) -> str:
-    """First integration ref that actually exists here.
+# Candidates in preference order. A clone with no origin/main -- a fresh
+# sandbox, a fork named master, a detached checkout -- would otherwise report an
+# empty surface and silently turn overlap detection off.
+BASE_CANDIDATES = ("origin/HEAD", "origin/main", "origin/master",
+                   "upstream/main", "upstream/master",
+                   "main", "master", "develop", "trunk")
 
-    A clone with no origin/main -- a fresh sandbox, a fork named master, a
-    detached checkout -- would otherwise report an empty surface and silently
-    turn overlap detection off.
+
+@functools.lru_cache(maxsize=8)
+def _existing_refs(root: str) -> frozenset:
+    """Which of the candidate refs exist, in a single call.
+
+    Probing each with its own `rev-parse` cost eight subprocesses every time
+    anything wanted the working surface -- which is every heartbeat, every
+    status, and every pre-edit hook.
     """
-    candidates: list[str] = [preferred] if preferred else []
-    head = run(["git", "-C", str(repo_root), "symbolic-ref", "--quiet",
-                "refs/remotes/origin/HEAD"], timeout=5)
-    if head:
-        candidates.append(head.removeprefix("refs/remotes/"))
-    candidates += ["origin/main", "origin/master", "upstream/main", "upstream/master",
-                   "main", "master", "develop", "trunk"]
-    for ref in candidates:
-        if not ref:
-            continue
-        probe = run(["git", "-C", str(repo_root), "rev-parse", "--verify", "--quiet",
-                     f"{ref}^{{commit}}"], timeout=5)
-        if probe:
+    out = run(["git", "-C", root, "for-each-ref", "--format=%(refname:short)",
+               "refs/heads", "refs/remotes"], timeout=8)
+    return frozenset(line.strip() for line in out.splitlines() if line.strip())
+
+
+def resolve_base_ref(repo_root: Path, preferred: str | None = None) -> str:
+    """First integration ref that actually exists here."""
+    existing = _existing_refs(str(repo_root))
+    for ref in ((preferred,) if preferred else ()) + BASE_CANDIDATES:
+        if ref and ref in existing:
             return ref
     return ""
 

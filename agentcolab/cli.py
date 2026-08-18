@@ -188,7 +188,10 @@ def cmd_join(store: Store, args: argparse.Namespace) -> int:
     if reclaimed:
         print(f"note: reclaimed {reclaimed} record(s) you had published before "
               f"this machine lost its local state")
-    session.write_heartbeat(store, intent=args.intent or "", deep=True,
+    # Shallow, so the person waiting gets their prompt back. The deep
+    # fingerprint -- toolchain versions, lockfile hashes, env key shapes -- is
+    # only needed by a cross-machine bug report, and is collected on demand.
+    session.write_heartbeat(store, intent=args.intent or "", deep=False,
                             publish=bool(push_url))
     store.update_local(last_sync=iso())
 
@@ -880,6 +883,7 @@ def _capture(command: list[str], cwd: Path) -> dict[str, Any]:
 
 def cmd_bug(store: Store, args: argparse.Namespace) -> int:
     """A failure that may be the machine rather than the code."""
+    deep = session.deep_fingerprint(store, force=args.fresh)
     bug = {
         "id": new_id("b"),
         "agent": store.agent,
@@ -891,7 +895,7 @@ def cmd_bug(store: Store, args: argparse.Namespace) -> int:
         "ts": iso(),
         # The whole point: what is true about THIS machine, so somebody else can
         # diff their own against it without either of us publishing a secret.
-        "fingerprint": records.scrub_deep(records.fingerprint(store.repo_root, deep=True)),
+        "fingerprint": deep,
     }
     if args.capture:
         bug["capture"] = _capture(list(args.capture), store.repo_root)
@@ -1814,6 +1818,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--paths", nargs="*")
     p.add_argument("--capture", nargs="*",
                    help="-- <cmd>: run it here and record the exact failure")
+    p.add_argument("--fresh", action="store_true",
+                   help="re-probe the toolchain instead of using the cached fingerprint")
     p.set_defaults(func=cmd_bug)
 
     p = sub.add_parser("bugs", help="open cross-machine bugs")

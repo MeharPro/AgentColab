@@ -8,6 +8,42 @@ If you hit something not on this list, that is a bug report worth filing.
 
 ---
 
+## Not verified yet
+
+Said separately from the limitations below, because these are things that
+*should* work and have not been proven, which is a different claim from things
+that are known not to work.
+
+- **Discord and Slack have never been run against the live APIs.** The adapters
+  are written to the documented endpoints, the request shapes and rate-limit
+  handling are unit-covered, and `colab chat status` will tell you precisely
+  what is wrong. But nobody has yet pointed this at a real server. If you are
+  the first, please file what breaks.
+- **The `colab-relay` GitHub Action has not run in a real repository.**
+- **Only Claude Code hooks have been exercised end to end.** The Codex, Cursor
+  and opencode integrations write the right config files, verified in tests, but
+  no session of those harnesses has actually driven them.
+- **Not published to PyPI**, so `pip install agentcolab` does not work. The
+  installer and a git clone are the supported paths today.
+
+## Performance, measured
+
+Wall-clock numbers are meaningless without saying what machine, so the metric
+kept here is **subprocess count**, which is what actually determines how these
+feel — process spawn dominates everything this tool does.
+
+| Command | Subprocesses |
+|---|---|
+| `PreToolUse` hook (fires on every edit) | 2 |
+| `colab next --offline` | 0 |
+| `colab` (status, cached) | 9 |
+| `colab sync` | ~10 for the publish, flat in the number of records |
+
+`_build_tree` used to cost two spawns per record, so an agent got slower the
+longer it had been useful. It is flat now — `hash-object --stdin-paths` and
+`update-index --index-info` each take everything in one call. Verified flat at
+10 subprocesses while holding 16, 26 and 66 records.
+
 ## Known limitations
 
 **Semantic conflict is invisible.** Two changes that merge cleanly, compile,

@@ -21,6 +21,7 @@ ALLOWED = {
     "functools", "getpass", "hashlib", "hmac", "io", "json", "os", "pathlib",
     "platform", "re", "shlex", "shutil", "socket", "subprocess", "sys",
     "tempfile", "time", "typing", "unittest", "urllib", "uuid", "agentcolab",
+    "concurrent",
 }
 
 

@@ -120,11 +120,18 @@ def remote_url(root: Path, remote: str) -> str:
 
 
 def list_remotes(root: Path) -> dict[str, str]:
+    """Every remote and its URL in one call.
+
+    `git remote` followed by `git remote get-url` per remote is the obvious
+    shape and costs one process per remote. Process spawn dominates everything
+    this tool does -- it is the difference between `colab` feeling instant and
+    feeling broken -- so anything that can be one call is one call.
+    """
     out: dict[str, str] = {}
-    for line in gits(["remote"], cwd=root, check=False).splitlines():
-        name = line.strip()
-        if name:
-            out[name] = remote_url(root, name)
+    for line in gits(["remote", "-v"], cwd=root, check=False).splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] not in out:
+            out[parts[0]] = parts[1]
     return out
 
 
@@ -733,30 +740,46 @@ class Store:
     def _build_tree(self, base_ref: str) -> str:
         """Remote tree, minus everything we own, plus everything we own now.
 
-        Enumerated with `ls-tree` rather than `ls-files`: the state repo is bare,
-        and `ls-files` refuses to run without a work tree. It failed silently,
-        which meant nothing was ever removed -- so a renamed agent stayed in the
-        roster forever and a deleted record came back on the next publish.
+        Three subprocesses regardless of how many records this agent holds.
+
+        The obvious implementation -- `hash-object` then `update-index` per
+        record -- costs two process spawns each, so an agent with fifty findings
+        paid a hundred spawns on every heartbeat, and got slower the longer it
+        had been useful. `--stdin-paths` hashes every blob in one call and
+        `--index-info` applies every addition and removal in another, so the
+        cost is flat.
+
+        Enumerated with `ls-tree` rather than `ls-files`: `ls-files` refuses to
+        run without a work tree and fails *silently*, which meant nothing was
+        ever removed and a renamed agent haunted the roster forever.
         """
-        # A dedicated index, never the repo's own, so a half-finished publish
-        # cannot leave state behind that the next one inherits.
         index = self.home / "build-index"
         with contextlib.suppress(OSError):
             index.unlink()
+
+        entries: list[str] = []
         if base_ref:
             git(["read-tree", base_ref], cwd=self.state, index_file=index)
             owned = self.owned_names()
             listing = git(["ls-tree", "-r", "--name-only", base_ref], cwd=self.state)
             for path in listing.stdout.decode(errors="ignore").splitlines():
                 if path and self._owner_of(path) in owned:
-                    git(["update-index", "--force-remove", path], cwd=self.state,
-                        index_file=index)
-        for path, data in self._own_records().items():
-            blob = git(["hash-object", "-w", "--stdin"], cwd=self.state,
-                       stdin_bytes=json.dumps(data, sort_keys=True, indent=1).encode())
-            sha = blob.stdout.decode().strip()
-            git(["update-index", "--add", "--cacheinfo", f"100644,{sha},{path}"],
-                cwd=self.state, index_file=index)
+                    # The all-zero sha in --index-info means "remove this path".
+                    entries.append(f"0 {'0' * 40}\t{path}")
+
+        mine = sorted(self._own_records())
+        if mine:
+            paths = "\n".join(str(self.mine / rel) for rel in mine).encode() + b"\n"
+            hashed = git(["hash-object", "-w", "--stdin-paths"], cwd=self.state,
+                         stdin_bytes=paths)
+            shas = hashed.stdout.decode(errors="ignore").split()
+            if len(shas) != len(mine):
+                raise LinkError(f"hashed {len(shas)} blobs for {len(mine)} records")
+            entries += [f"100644 {sha}\t{rel}" for sha, rel in zip(shas, mine)]
+
+        if entries:
+            git(["update-index", "--index-info"], cwd=self.state, index_file=index,
+                stdin_bytes=("\n".join(entries) + "\n").encode())
         tree = git(["write-tree"], cwd=self.state,
                    index_file=index).stdout.decode(errors="ignore").strip()
         with contextlib.suppress(OSError):

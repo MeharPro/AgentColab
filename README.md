@@ -132,12 +132,18 @@ adding another is one file.
 ## Install
 
 ```bash
-# any of these
 curl -fsSL https://raw.githubusercontent.com/MeharPro/AgentColab/main/install.sh | sh
-pipx install agentcolab
-uv tool install agentcolab
-git clone https://github.com/MeharPro/AgentColab && export PATH="$PWD/AgentColab/bin:$PATH"
 ```
+
+or, if you would rather not pipe a script to a shell (reasonable):
+
+```bash
+git clone https://github.com/MeharPro/AgentColab ~/.local/lib/agentcolab
+export PATH="$HOME/.local/lib/agentcolab/bin:$PATH"
+```
+
+*(Not on PyPI yet, so `pip install agentcolab` will not work. The package
+metadata is ready; publishing is waiting on a release tag.)*
 
 Python 3.9+ and git. **No dependencies, no build step, no postinstall script,
 no network access at install time.** It is a tool that runs inside your agent's
