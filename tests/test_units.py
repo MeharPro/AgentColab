@@ -61,6 +61,25 @@ class Scrubbing(unittest.TestCase):
         self.assertTrue(records.looks_like_secret(blob))
         self.assertIn("[WITHHELD]", records.withhold_secrets(f"token {blob}"))
 
+    def test_a_url_alone_does_not_look_like_a_secret(self):
+        # Found by running 330 real messages from a live deployment through
+        # this module: a link in a note flagged the whole message, which
+        # triggered a withhold pass that blanked unrelated strings in it.
+        text = "see https://github.com/o/r/blob/a1b2c3d4/src/pay.py#L88-L120 for context"
+        self.assertFalse(records.looks_like_secret(text))
+        self.assertEqual(records.withhold_secrets(text), text)
+
+    def test_the_two_entropy_checks_agree(self):
+        for text in ("plain words only",
+                     "see https://example.com/very/long/path/segment/here/ok",
+                     "token Zk3Lm9Qp2Rt5Vx8Yb1Ec4Hg7Jn0Ks3Mv6Pw9Sz2Ad5Fh8",
+                     "url https://x.com/a and blob Zk3Lm9Qp2Rt5Vx8Yb1Ec4Hg7Jn0Ks3Mv6Pw9Sz2Ad5"):
+            with self.subTest(text=text[:30]):
+                flagged = records.looks_like_secret(text)
+                changed = records.withhold_secrets(text) != text
+                self.assertEqual(flagged, changed,
+                                 "the detector and the redactor disagree")
+
     def test_urls_and_dotted_paths_are_not_withheld(self):
         text = "see https://example.com/a/very/long/path/that/goes/on/forever/ok"
         self.assertEqual(records.withhold_secrets(text), text)

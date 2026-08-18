@@ -165,22 +165,35 @@ def _is_innocent_blob(candidate: str) -> bool:
     return candidate.count(".") > 3 or candidate.startswith(("http", "www"))
 
 
+# URLs are masked out before either entropy check runs. Without this the blob
+# pattern starts matching *inside* a long URL (the scheme's ':' is not in the
+# character class), which broke two things: `withhold_secrets` turned
+# `https://example.com/a/long/path` into `https:[WITHHELD]`, and
+# `looks_like_secret` reported any message containing a long URL as
+# credential-bearing. The second was found by running 330 real messages from a
+# running deployment through this module -- a link in a note was enough to
+# trigger a withhold pass that then blanked unrelated legitimate strings in the
+# same message.
+_URL = re.compile(r"\b(?:https?|ftp|ftps|git|ssh|file)://[^\s<>\"']+", re.I)
+
+
+def _without_urls(text: str) -> str:
+    return _URL.sub(" ", text or "")
+
+
 def looks_like_secret(text: str) -> bool:
-    for candidate in _BLOB.findall(text or ""):
+    """Is there a credential-shaped run in here that the patterns did not catch?
+
+    Must agree with `withhold_secrets` about what counts, or a message gets
+    scrubbed harder than it needed to be for a reason nobody can see.
+    """
+    for candidate in _BLOB.findall(_without_urls(text)):
         if _is_innocent_blob(candidate):
             continue
         if sum(c.isdigit() for c in candidate) and sum(c.isupper() for c in candidate) \
                 and sum(c.islower() for c in candidate):
             return True
     return False
-
-
-# URLs are masked out before the entropy pass runs. Without this, the blob
-# pattern starts matching *inside* a long URL (the scheme's ':' is not in the
-# character class), so `https://example.com/a/long/path` came back as
-# `https:[WITHHELD]` -- which destroys the one thing an agent most often needs
-# to pass along intact.
-_URL = re.compile(r"\b(?:https?|ftp|ftps|git|ssh|file)://[^\s<>\"']+", re.I)
 
 
 def withhold_secrets(text: str) -> str:
