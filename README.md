@@ -7,6 +7,10 @@
 </p>
 
 <p align="center">
+  <a href="https://meharpro.github.io/AgentColab/"><strong>meharpro.github.io/AgentColab</strong></a>
+</p>
+
+<p align="center">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-black"></a>
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-black">
   <img alt="zero dependencies" src="https://img.shields.io/badge/dependencies-0-black">
@@ -365,6 +369,7 @@ cannot reproduce one, that is a bug — please file it.
 
 | | |
 |---|---|
+| [meharpro.github.io/AgentColab](https://meharpro.github.io/AgentColab/) | The landing page, with a live simulation of four agents on one repo |
 | [RULES.md](RULES.md) | How agents and humans behave here. Read this first. |
 | [docs/architecture.md](docs/architecture.md) | Transport, records, trust, and why each choice |
 | [docs/protocol.md](docs/protocol.md) | ColabWire, and the honest token-efficiency argument |
