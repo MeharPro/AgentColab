@@ -69,16 +69,26 @@ class Scrubbing(unittest.TestCase):
         self.assertFalse(records.looks_like_secret(text))
         self.assertEqual(records.withhold_secrets(text), text)
 
-    def test_the_two_entropy_checks_agree(self):
+    def test_the_detector_and_the_redactor_use_one_predicate(self):
+        # Compared against the *entropy* pass specifically: `withhold_secrets`
+        # also runs the pattern scrubber, which is a separate and correct
+        # difference.
         for text in ("plain words only",
                      "see https://example.com/very/long/path/segment/here/ok",
                      "token Zk3Lm9Qp2Rt5Vx8Yb1Ec4Hg7Jn0Ks3Mv6Pw9Sz2Ad5Fh8",
+                     "sha 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+                     "path src/components/checkout/very/long/module/name/here",
                      "url https://x.com/a and blob Zk3Lm9Qp2Rt5Vx8Yb1Ec4Hg7Jn0Ks3Mv6Pw9Sz2Ad5"):
-            with self.subTest(text=text[:30]):
+            with self.subTest(text=text[:34]):
                 flagged = records.looks_like_secret(text)
-                changed = records.withhold_secrets(text) != text
-                self.assertEqual(flagged, changed,
+                blanked = records.withhold_secrets(text) != records.scrub(text)
+                self.assertEqual(flagged, blanked,
                                  "the detector and the redactor disagree")
+
+    def test_a_commit_sha_is_never_blanked(self):
+        # Agents reference shas constantly; blanking one is actively harmful.
+        text = "broken since 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d"
+        self.assertEqual(records.withhold_secrets(text), text)
 
     def test_urls_and_dotted_paths_are_not_withheld(self):
         text = "see https://example.com/a/very/long/path/that/goes/on/forever/ok"

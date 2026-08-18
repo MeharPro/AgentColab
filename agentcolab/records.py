@@ -181,19 +181,32 @@ def _without_urls(text: str) -> str:
     return _URL.sub(" ", text or "")
 
 
-def looks_like_secret(text: str) -> bool:
-    """Is there a credential-shaped run in here that the patterns did not catch?
+def _is_secret_shaped(candidate: str) -> bool:
+    """One predicate, used by both the detector and the redactor.
 
-    Must agree with `withhold_secrets` about what counts, or a message gets
-    scrubbed harder than it needed to be for a reason nobody can see.
+    Length alone is not enough, and using it was a real bug: replaying 330
+    records from a running deployment showed the redactor blanking content in 22
+    of them that the detector did not consider secret-shaped at all -- long
+    identifiers, base64-ish payloads, and anything else that happened to run
+    past 40 characters.
+
+    Requiring digits *and* both cases is what separates a generated credential
+    from the things agents legitimately pass around. It deliberately spares a
+    git sha (lowercase hex, no uppercase), which agents reference constantly and
+    which would be actively harmful to blank. It accepts that an all-lowercase
+    secret slips through the entropy net -- those are rare, and the pattern list
+    above is the first line of defence anyway.
     """
-    for candidate in _BLOB.findall(_without_urls(text)):
-        if _is_innocent_blob(candidate):
-            continue
-        if sum(c.isdigit() for c in candidate) and sum(c.isupper() for c in candidate) \
-                and sum(c.islower() for c in candidate):
-            return True
-    return False
+    if _is_innocent_blob(candidate):
+        return False
+    return bool(sum(c.isdigit() for c in candidate)
+                and sum(c.isupper() for c in candidate)
+                and sum(c.islower() for c in candidate))
+
+
+def looks_like_secret(text: str) -> bool:
+    """Is there a credential-shaped run here that the patterns did not catch?"""
+    return any(_is_secret_shaped(c) for c in _BLOB.findall(_without_urls(text)))
 
 
 def withhold_secrets(text: str) -> str:
@@ -212,7 +225,7 @@ def withhold_secrets(text: str) -> str:
 
     out = _URL.sub(stash, out)
     out = _BLOB.sub(
-        lambda m: m.group(0) if _is_innocent_blob(m.group(0)) else "[WITHHELD]", out)
+        lambda m: "[WITHHELD]" if _is_secret_shaped(m.group(0)) else m.group(0), out)
     for index, url in enumerate(shelf):
         out = out.replace(f"\x00URL{index}\x00", url)
     return out

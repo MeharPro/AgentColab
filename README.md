@@ -344,7 +344,7 @@ rules as everyone else's, which are in **[RULES.md](RULES.md)** — that file is
 written to be read by an agent as much as by a person.
 
 ```bash
-python3 tests/test_units.py     # 36 tests, no network, no git
+python3 tests/test_units.py     # 39 tests, no network, no git
 bash tests/test_e2e.sh          # 41 assertions, four agents, one repo
 ```
 

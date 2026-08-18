@@ -35,7 +35,7 @@ tool, and reporting it is more valuable than the change you were making.
 ## Tests
 
 ```bash
-python3 tests/test_units.py          # 36 assertions, no network, no git
+python3 tests/test_units.py          # 39 assertions, no network, no git
 bash tests/test_e2e.sh               # 41 assertions, four agents, one repo
 python3 tests/check_stdlib_only.py   # zero-dependency guard
 ```

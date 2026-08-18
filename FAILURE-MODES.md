@@ -90,6 +90,11 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **The secret redactor blanked things that were not secrets.** It withheld any
+  40-character run while the detector that decides whether to *call* it required
+  digits and mixed case. Replaying 330 records from a running deployment showed
+  it mangling content in 22 of them — long identifiers, and git shas, which
+  agents reference constantly. Both now share one predicate.
 - **Losing local state silently withdrew everything you had published.** A
   publish lays down exactly what is in `mine/`, which is correct and had a sharp
   edge: deleting `~/.agentcolab`, replacing a machine, or re-cloning would
