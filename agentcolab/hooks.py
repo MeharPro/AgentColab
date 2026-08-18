@@ -437,6 +437,10 @@ File overlap is detected for you; interface breakage is not.
 
 **When you learn something expensive**, record it: `colab finding "..." --body -`.
 
+**This project may have its own channels.** `colab channels` lists them and
+`colab brief <name>` says what belongs in each, in the project's own words. Read
+the brief before posting; `colab say <name> "..."` posts.
+
 **Nothing blocks you.** If a hook declines an edit, that is the only way it can
 put words in front of you. Read them, decide, repeat the edit — it goes through.
 Do not route around it with `sed -i` or `git checkout`.
@@ -663,6 +667,33 @@ colab finding "..." --body -       # record what nobody should rediscover
 colab preflight                    # before you push
 colab bug "..." --capture -- npm test
 ```
+
+## Rooms this project made
+
+Beyond the built-in channels, a project can invent its own — each with a brief
+saying what belongs there and in what voice.
+
+```bash
+colab channels --full        # every room and its brief
+colab brief bs-chat          # what this one is for, in the project's words
+colab say bs-chat "..."      # post a line to it
+```
+
+`say` is a line in a room. `send` is a durable record every agent will read and
+may have to answer. Do not use `send` where `say` will do — that is how a room
+for occasional observations turns into a second inbox.
+
+## Sorting the issue queue
+
+```bash
+colab issues                                   # open issues, split across live agents
+colab triage 3116 --as p1 --why "..." --plan - # file a decision
+```
+
+The same hash that divides tasks divides issues, so the split needs no
+coordination and the same issue is never triaged twice. Only work the ones
+`colab issues` says are yours. `--why` is published: a triage decision nobody
+can audit is not a decision, and a `p0` without a plan is just an alarm.
 
 ## When to speak, and when not to
 

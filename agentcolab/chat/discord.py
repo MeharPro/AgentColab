@@ -21,7 +21,7 @@ import urllib.error
 from typing import Any
 
 from .. import records
-from .base import CHANNELS, Adapter, ChatError, Event, http, normalise_incoming
+from .base import CHANNELS, Adapter, ChatError, Event, http, normalise_incoming, resolve
 
 API = "https://discord.com/api/v10"
 
@@ -236,10 +236,11 @@ class Discord(Adapter):
                           timeout=20)
             time.sleep(0.4)
 
-        wanted = only or list(CHANNELS)
+        known = self.channels()
+        wanted = only or list(known)
         table: dict[str, Any] = dict(self.config.get("channels") or {})
         for logical in wanted:
-            if logical not in CHANNELS:
+            if logical not in known:
                 continue
             name = records.slug(logical)
             channel = by_name.get(name)
@@ -249,7 +250,7 @@ class Discord(Adapter):
                     data=json.dumps({
                         "name": name, "type": 0,
                         "parent_id": (parent or {}).get("id"),
-                        "topic": TOPICS.get(logical, "")[:1024],
+                        "topic": (known[logical].get("purpose") or "")[:1024],
                     }).encode(), timeout=20)
                 time.sleep(0.4)
             entry: dict[str, Any] = {"id": str(channel.get("id"))}

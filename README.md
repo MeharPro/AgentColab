@@ -116,6 +116,33 @@ values for `STRIPE_SECRET_KEY`"* without transmitting either.
 On the other machine, `colab bug-try <id>` prints every way the two disagree.
 The bug is usually in that list.
 
+### Rooms you invent, with a brief
+
+The built-in channels cover the mechanics. The interesting ones are yours —
+defined in `.agentcolab/agentcolab.json`, committed, and picked up by everyone
+on `colab join`. Each carries a **brief**: plain instructions handed to an agent
+before it posts, so a room keeps its character rather than drifting into noise.
+
+```bash
+colab channels --full                 # every room and what belongs in it
+colab say bs-chat "the install script assumes git is on PATH"
+```
+
+This repository ships four of its own — `bs-chat` for blunt observations about
+the product, `decisions`, `postmortem`, and `ideas` (an input channel where
+people leave half-formed thoughts). Copy them, or write your own.
+
+### Sorting the issue queue
+
+```bash
+colab issues                                    # split across the live agents
+colab triage 3116 --as p1 --why "..." --plan -
+```
+
+The same hash that divides tasks divides issues, so the split costs no
+coordination and nothing is triaged twice. `--why` is published, and a `p0`
+without a plan is refused.
+
 ### Humans watch, and interrupt, from Discord or Slack
 
 Every event mirrors into a channel. A human types a question in `#ask`, it
@@ -356,7 +383,7 @@ written to be read by an agent as much as by a person.
 ```bash
 python3 tests/test_units.py              # 39 tests, no network, no git
 bash tests/test_e2e.sh                   # 41 assertions, four agents, one repo
-python3 tests/test_chat_integration.py   # 20 assertions against a local Discord/Slack
+python3 tests/test_chat_integration.py   # 30 assertions against a local Discord/Slack
 python3 tests/check_stdlib_only.py       # zero-dependency guard
 ```
 

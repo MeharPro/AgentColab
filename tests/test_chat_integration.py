@@ -348,6 +348,50 @@ class ChatAdapters(unittest.TestCase):
         self.assertEqual(len(FakeAPI.created), first)
 
 
+class CustomChannels(unittest.TestCase):
+    """A project inventing its own rooms is configuration, not a code change."""
+
+    CONF = {"chat": {"custom": {
+        "bs-chat": {"dir": "out", "purpose": "Blunt observations.",
+                    "brief": "Be specific. Post rarely."},
+        "ideas":   {"dir": "in",  "purpose": "Humans drop ideas."},
+    }}}
+
+    def test_builtins_survive_alongside_custom_ones(self):
+        got = base.resolve(self.CONF)
+        for name in base.BUILTIN:
+            self.assertIn(name, got)
+        self.assertIn("bs-chat", got)
+
+    def test_a_brief_is_carried_through(self):
+        self.assertIn("Post rarely", base.resolve(self.CONF)["bs-chat"]["brief"])
+
+    def test_a_custom_channel_can_be_an_input(self):
+        self.assertIn("ideas", base.inputs(self.CONF))
+        self.assertIn("ask", base.inputs(self.CONF))
+
+    def test_custom_channels_default_to_output(self):
+        got = base.resolve({"chat": {"custom": {"notes": {"purpose": "x"}}}})
+        self.assertEqual(got["notes"]["dir"], "out")
+
+    def test_a_name_cannot_escape_into_a_path_or_a_route(self):
+        got = base.resolve({"chat": {"custom": {"../../etc/passwd": {"purpose": "x"},
+                                                "with space!": {"purpose": "y"}}}})
+        self.assertNotIn("../../etc/passwd", got)
+        self.assertTrue(all(all(c.isalnum() or c in "-_" for c in k) for k in got))
+
+    def test_a_project_may_retune_a_builtin_without_losing_it(self):
+        got = base.resolve({"chat": {"custom": {"link": {"brief": "keep it short"}}}})
+        self.assertEqual(got["link"]["dir"], "out")
+        self.assertIn("keep it short", got["link"]["brief"])
+        self.assertIn("Agent-to-agent", got["link"]["purpose"])
+
+    def test_adapters_can_route_and_provision_a_custom_channel(self):
+        adapter = discord.Discord({"token": "t", "custom": self.CONF["chat"]["custom"],
+                                   "channels": {}})
+        self.assertIn("bs-chat", adapter.channels())
+
+
 class LiveRouteShapes(unittest.TestCase):
     """Against the real discord.com. Sends no credentials; skipped when offline.
 

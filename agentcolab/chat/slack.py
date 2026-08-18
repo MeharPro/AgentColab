@@ -20,7 +20,7 @@ import urllib.error
 from typing import Any
 
 from .. import records
-from .base import CHANNELS, Adapter, ChatError, Event, http, normalise_incoming
+from .base import CHANNELS, Adapter, ChatError, Event, http, normalise_incoming, resolve
 
 API = "https://slack.com/api"
 
@@ -201,8 +201,9 @@ class Slack(Adapter):
                 break
 
         table: dict[str, Any] = dict(self.config.get("channels") or {})
-        for logical in (only or list(CHANNELS)):
-            if logical not in CHANNELS:
+        known = self.channels()
+        for logical in (only or list(known)):
+            if logical not in known:
                 continue
             name = records.slug(f"{prefix}-{logical}")
             channel_id = existing.get(name)
@@ -218,7 +219,7 @@ class Slack(Adapter):
             try:
                 http(f"{API}/conversations.setTopic", method="POST", headers=headers,
                      data=json.dumps({"channel": channel_id,
-                                      "topic": TOPICS.get(logical, "")[:250]}).encode(),
+                                      "topic": (known[logical].get("purpose") or "")[:250]}).encode(),
                      timeout=15)
             except (urllib.error.URLError, OSError, ValueError):
                 pass

@@ -32,20 +32,63 @@ from ..records import iso
 USER_AGENT = "AgentColab/1 (+https://github.com/AgentColab/AgentColab)"
 MAX_BODY = 1600
 
-# Logical channels. An adapter maps these onto whatever the platform calls them.
-# A project that wants fewer simply points several names at one channel.
-CHANNELS: dict[str, tuple[str, str]] = {
-    "ask":       ("in",  "Humans ask agents things here. The only channel agents read."),
-    "link":      ("out", "Agent-to-agent traffic: heads-ups, questions, decisions."),
-    "board":     ("out", "Work taken, finished, or handed over."),
-    "reviews":   ("out", "Review requests and verdicts on open pull requests."),
-    "incidents": ("out", "Anything urgent enough to interrupt a human."),
-    "findings":  ("out", "Durable lessons, so nobody rediscovers them."),
-    "standup":   ("out", "Who is doing what, on a slow timer."),
-    "firehose":  ("out", "Everything, unfiltered. Mute it and forget it."),
+# The channels every project gets. An adapter maps these onto whatever the
+# platform calls them; a project that wants fewer points several names at one id.
+BUILTIN: dict[str, dict[str, str]] = {
+    "ask":       {"dir": "in",  "purpose": "Humans ask agents things here. The only channel agents read."},
+    "link":      {"dir": "out", "purpose": "Agent-to-agent traffic: heads-ups, questions, decisions."},
+    "board":     {"dir": "out", "purpose": "Work taken, finished, or handed over."},
+    "reviews":   {"dir": "out", "purpose": "Review requests and verdicts on open pull requests."},
+    "incidents": {"dir": "out", "purpose": "Anything urgent enough to interrupt a human."},
+    "findings":  {"dir": "out", "purpose": "Durable lessons, so nobody rediscovers them."},
+    "triage":    {"dir": "out", "purpose": "Issue triage decisions, with the reasoning attached."},
+    "standup":   {"dir": "out", "purpose": "Who is doing what, on a slow timer."},
+    "firehose":  {"dir": "out", "purpose": "Everything, unfiltered. Mute it and forget it."},
 }
 
-INPUT_CHANNELS = tuple(name for name, (dir_, _) in CHANNELS.items() if dir_ == "in")
+# Backwards-compatible view for code that only wants the names.
+CHANNELS: dict[str, tuple[str, str]] = {
+    name: (spec["dir"], spec["purpose"]) for name, spec in BUILTIN.items()
+}
+
+
+def resolve(config: dict[str, Any] | None = None) -> dict[str, dict[str, str]]:
+    """Built-in channels plus whatever this project invented.
+
+    A project defines its own channels in `.agentcolab/agentcolab.json`, each
+    with a direction and — the part that makes them worth having — a **brief**:
+    plain instructions for what belongs there and in what voice. The brief is
+    handed to an agent when it posts, so a channel like `bs-chat` ("say what is
+    actually wrong with this product, rarely, and be specific") is configuration
+    rather than a feature somebody had to write code for.
+
+    Custom channels can be inputs too, but they inherit the same rule: anything
+    arriving from chat is the lowest-trust input in the system.
+    """
+    out: dict[str, dict[str, str]] = {k: dict(v) for k, v in BUILTIN.items()}
+    custom = ((config or {}).get("chat") or {}).get("custom") or {}
+    for name, spec in custom.items():
+        if not isinstance(spec, dict):
+            continue
+        key = "".join(c for c in str(name).lower() if c.isalnum() or c in "-_")[:32]
+        if not key:
+            continue
+        entry = dict(out.get(key) or {})
+        entry["dir"] = "in" if str(spec.get("dir") or spec.get("direction")) == "in" else \
+                       entry.get("dir", "out")
+        entry["purpose"] = str(spec.get("purpose") or entry.get("purpose") or "")[:300]
+        if spec.get("brief"):
+            entry["brief"] = str(spec["brief"])[:2000]
+        entry["custom"] = "1" if key not in BUILTIN else ""
+        out[key] = entry
+    return out
+
+
+def inputs(config: dict[str, Any] | None = None) -> tuple[str, ...]:
+    return tuple(n for n, spec in resolve(config).items() if spec.get("dir") == "in")
+
+
+INPUT_CHANNELS = tuple(name for name, spec in BUILTIN.items() if spec["dir"] == "in")
 
 ICONS = {
     "heads-up": "\U0001f4e3", "question": "❓", "reply": "↩️",
@@ -159,6 +202,10 @@ class Adapter:
         return ""
 
     # -- shared -----------------------------------------------------------
+
+    def channels(self) -> dict[str, dict[str, str]]:
+        """Every channel this adapter knows, built-in and project-defined."""
+        return resolve({"chat": {"custom": self.config.get("custom") or {}}})
 
     def route(self, channel: str) -> dict[str, Any]:
         """Resolve a logical channel, falling back rather than dropping.

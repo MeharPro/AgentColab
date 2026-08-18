@@ -11,8 +11,8 @@ from __future__ import annotations
 import contextlib
 from typing import Any
 
-from .base import (CHANNELS, INPUT_CHANNELS, UNTRUSTED_BANNER, Adapter, ChatError,
-                   Event, normalise_incoming)
+from .base import (BUILTIN, CHANNELS, INPUT_CHANNELS, UNTRUSTED_BANNER, Adapter,
+                   ChatError, Event, inputs, normalise_incoming, resolve)
 from .discord import Discord
 from .slack import Slack
 
@@ -21,8 +21,9 @@ DRIVERS: dict[str, type[Adapter]] = {
     "slack": Slack,
 }
 
-__all__ = ["CHANNELS", "INPUT_CHANNELS", "UNTRUSTED_BANNER", "Adapter", "ChatError",
-           "Event", "DRIVERS", "adapters", "post", "poll", "enabled", "normalise_incoming"]
+__all__ = ["BUILTIN", "CHANNELS", "INPUT_CHANNELS", "UNTRUSTED_BANNER", "Adapter",
+           "ChatError", "Event", "DRIVERS", "adapters", "post", "poll", "enabled",
+           "inputs", "normalise_incoming", "resolve"]
 
 
 def adapters(config: dict[str, Any]) -> list[Adapter]:
@@ -37,7 +38,11 @@ def adapters(config: dict[str, Any]) -> list[Adapter]:
     for name in chat.get("drivers") or ([chat["driver"]] if chat.get("driver") else []):
         factory = DRIVERS.get(str(name))
         if factory and isinstance(chat.get(name), dict):
-            out.append(factory(chat[name]))
+            settings = dict(chat[name])
+            # Project-defined channels live beside the drivers, not inside one,
+            # so hand them down or an adapter cannot route or provision them.
+            settings.setdefault("custom", chat.get("custom") or {})
+            out.append(factory(settings))
     return out
 
 

@@ -53,6 +53,7 @@ feel — process spawn dominates everything this tool does.
 | `colab next --offline` | 0 |
 | `colab` (status, cached) | 9 |
 | `colab sync` | ~10 for the publish, flat in the number of records |
+| `colab channels` / `brief` | 1 (reads the committed config) |
 
 `_build_tree` used to cost two spawns per record, so an agent got slower the
 longer it had been useful. It is flat now — `hash-object --stdin-paths` and

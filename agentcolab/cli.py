@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import uuid
@@ -259,7 +260,10 @@ def _project_config(root: Path) -> dict[str, Any]:
     never live here — the repository is public, and a token in it is a token
     that is already burned.
     """
-    for name in (".agentcolab/colab.json", ".agentcolab/config.json", "colab.json"):
+    # `agentcolab.json` is what the docs and `colab chat export` both name; the
+    # others are accepted so a repo that picked a reasonable variant still works.
+    for name in (".agentcolab/agentcolab.json", ".agentcolab/colab.json",
+                 ".agentcolab/config.json", "agentcolab.json"):
         path = root / name
         if path.is_file():
             data = read_json(path)
@@ -1455,6 +1459,233 @@ def cmd_relay(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
+def _channels(store: Store) -> dict[str, dict[str, str]]:
+    """Every channel, built-in and project-defined, merged from the repo config."""
+    project = _project_config(store.repo_root)
+    merged = {"chat": {"custom": {**((project.get("chat") or {}).get("custom") or {}),
+                                  **((store.config().get("chat") or {}).get("custom") or {})}}}
+    return chat.resolve(merged)
+
+
+def cmd_channels(store: Store, args: argparse.Namespace) -> int:
+    """What rooms exist, what belongs in each, and what to type to post there."""
+    known = _channels(store)
+    live = {}
+    for adapter in chat.adapters(store.config()):
+        live.update(adapter.config.get("channels") or {})
+    for name, spec in known.items():
+        mark = "in " if spec.get("dir") == "in" else "out"
+        star = " *" if spec.get("custom") else "  "
+        wired = "wired" if name in live else "-"
+        print(f"{star}{name:<14} {mark}  {wired:<6} {spec.get('purpose','')}")
+        if args.full and spec.get("brief"):
+            for line in str(spec["brief"]).splitlines():
+                print(f"      {line}")
+    print()
+    print("* project-defined. Add your own in .agentcolab/agentcolab.json:")
+    print('    {"chat": {"custom": {"bs-chat": {"purpose": "...", "brief": "..."}}}}')
+    print("Then `colab chat provision` creates them, and `colab say bs-chat \"...\"` posts.")
+    return 0
+
+
+def cmd_say(store: Store, args: argparse.Namespace) -> int:
+    """Post to any channel, including ones this project invented.
+
+    Separate from `send` on purpose. `send` writes a durable record to the git
+    ref that every agent will read and may have to answer; `say` is a line in a
+    room. Conflating them is how a channel meant for occasional sharp
+    observations turns into a second inbox.
+    """
+    known = _channels(store)
+    name = records.slug(args.channel, limit=32)
+    if name not in known:
+        eprint(f"colab: no channel {args.channel!r}. Known: {', '.join(sorted(known))}")
+        eprint("     Add one in .agentcolab/agentcolab.json — see `colab channels`.")
+        return 1
+    if session.budget_left(store) <= 0 and not args.force:
+        eprint("colab: coordination is over its hourly token budget. Do the work; talk later.")
+        return 2
+    body = records.scrub(_body(args.body) or " ".join(args.text))[:4000]
+    if not body:
+        eprint("colab: nothing to say")
+        return 1
+    sent = session.mirror(store, "note", body.splitlines()[0][:120],
+                          body=body if "\n" in body or len(body) > 120 else "",
+                          channel=name)
+    session.charge(store, records.estimate_tokens(body), f"say:{name}")
+    if not sent:
+        eprint(f"colab: chat is not configured, so nothing was posted. `colab chat status`")
+        return 1
+    return _ok(f"posted to #{name}")
+
+
+def cmd_brief(store: Store, args: argparse.Namespace) -> int:
+    """What a channel is for, in its own words. Read this before posting to one."""
+    known = _channels(store)
+    name = records.slug(args.channel, limit=32)
+    spec = known.get(name)
+    if not spec:
+        eprint(f"colab: no channel {args.channel!r}")
+        return 1
+    print(f"#{name} · {'input' if spec.get('dir') == 'in' else 'output'}")
+    print(spec.get("purpose", ""))
+    if spec.get("brief"):
+        print()
+        print(spec["brief"])
+    else:
+        print()
+        print("No brief set. A project can add one in .agentcolab/agentcolab.json —")
+        print("it is handed to an agent before it posts, so the room keeps its character.")
+    if spec.get("dir") == "in":
+        print()
+        print(chat.UNTRUSTED_BANNER)
+    return 0
+
+
+# ---------------------------------------------------------------- triage
+
+PRIORITIES = {
+    "p0": "money, data loss, or the product is down",
+    "p1": "broken for real users; a workaround exists or is not universal",
+    "p2": "real but survivable",
+    "p3": "cosmetic, rare, or nice-to-have",
+    "noise": "recurring and judged not to be a bug",
+}
+
+
+def _gh_issues(store: Store, limit: int) -> list[dict[str, Any]]:
+    """Open issues, via the gh CLI so we inherit its auth rather than ask for a token."""
+    if not shutil.which("gh"):
+        return []
+    raw = records.run(["gh", "issue", "list", "--state", "open", "--limit", str(limit),
+                       "--json", "number,title,labels,createdAt,comments"],
+                      timeout=30, cwd=store.repo_root)
+    try:
+        data = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def cmd_issues(store: Store, args: argparse.Namespace) -> int:
+    """Sort the open issues across the live agents, deterministically.
+
+    The same hash that divides tasks divides issues, so every machine computes
+    the same split with no round trip and the same issue is never triaged twice.
+    An agent asks what it owns and gets an answer nobody else will also get.
+    """
+    session.refresh_if_stale(store)
+    issues = _gh_issues(store, args.limit)
+    if not issues:
+        eprint("colab: no open issues found (needs the `gh` CLI, authenticated, in a "
+               "GitHub repo)")
+        return 1
+    roster = board.live_agents(store)
+    done = {str(r.get("issue")) for r in store.read_all("tasks")
+            if r.get("kind") == "triage"}
+
+    mine, theirs = [], []
+    for issue in issues:
+        number = str(issue.get("number"))
+        owner = board.owner_of(f"issue:{number}", roster)
+        (mine if owner == store.agent else theirs).append((issue, owner))
+
+    print(f"{len(issues)} open issue(s) across {len(roster)} live agent(s)")
+    print()
+    todo = [(i, o) for i, o in mine if str(i.get("number")) not in done]
+    print(f"YOURS, NOT YET TRIAGED ({len(todo)})")
+    for issue, _ in todo[:args.show]:
+        labels = ",".join(l.get("name", "") for l in (issue.get("labels") or []))
+        print(f"  #{issue.get('number'):<6} {str(issue.get('title'))[:66]}")
+        if labels:
+            print(f"          labels: {labels}")
+    if not todo:
+        print("  (none — everything you own is triaged)")
+    if len(todo) > args.show:
+        print(f"  … and {len(todo) - args.show} more")
+    print()
+    print(f"OWNED BY OTHERS ({len(theirs)}) — leave them alone, they are not yours")
+    for issue, owner in theirs[:5]:
+        print(f"  #{issue.get('number'):<6} → {owner}")
+    print()
+    print("File a decision, and say why:")
+    print('  colab triage <number> --as p1 --why "..." [--plan -]')
+    return 0
+
+
+def cmd_triage(store: Store, args: argparse.Namespace) -> int:
+    """Record a triage decision. `--why` is required and gets published.
+
+    A triage decision nobody can audit is not a decision. For p0 a plan is
+    required too — a p0 without one is just an alarm, and the point of the
+    channel is that a human opening it does not start cold.
+    """
+    if args.priority == "p0" and not args.plan:
+        eprint("colab: a p0 needs --plan. An alarm without a first step is not triage.")
+        return 1
+    record = {
+        "id": records.content_id("tr", str(args.issue), args.priority),
+        "kind": "triage",
+        "agent": store.agent,
+        "issue": str(args.issue),
+        "priority": args.priority,
+        "why": records.scrub(args.why)[:1000],
+        "plan": records.scrub(_body(args.plan))[:4000],
+        "created_at": iso(),
+        "ts": iso(),
+    }
+    session.sign_and_put(store, f"tasks/{store.agent}/{record['id']}.json", record)
+    if store.push_url:
+        store.publish(f"triage #{args.issue}")
+    fields = {"issue": f"#{args.issue}", "as": args.priority,
+              "why": record["why"][:200]}
+    session.mirror(store, "task", f"#{args.issue} → {args.priority.upper()}",
+                   body=record["plan"], fields=fields,
+                   channel="incidents" if args.priority in ("p0", "p1") else "triage",
+                   wire_line=wire.encode("D", store.agent, "*", ref=f"#{args.issue}",
+                                         sev=args.priority, text=record["why"][:160]))
+    return _ok(f"#{args.issue} triaged as {args.priority.upper()} — "
+               f"{PRIORITIES[args.priority]}")
+
+
+def cmd_standup(store: Store, args: argparse.Namespace) -> int:
+    """A digest of who did what. Posts on a slow timer, or on demand."""
+    session.refresh_if_stale(store, force=True)
+    cutoff = now().timestamp() - records.parse_duration(args.since)
+    agents = session.classify_all(store, store.agents())
+    tasks = board.tasks(store)
+
+    lines: list[str] = []
+    for peer in sorted(agents, key=lambda a: str(a.get("agent"))):
+        name = str(peer.get("agent"))
+        stamp = parse_iso(peer.get("updated_at"))
+        if not stamp or stamp.timestamp() < cutoff:
+            continue
+        held = [t for t in tasks.values() if t.get("owner") == name
+                and t.get("state") in ("taken", "review")]
+        shipped = [t for t in tasks.values() if t.get("owner") == name
+                   and t.get("state") == "done"]
+        bit = f"**{name}** · `{peer.get('branch')}`"
+        if peer.get("intent"):
+            bit += f" — {records.one_line(peer.get('intent'), 90)}"
+        if held:
+            bit += f"\n    holding: " + ", ".join(str(t.get("title"))[:40] for t in held[:3])
+        if shipped:
+            bit += f"\n    shipped: {len(shipped)}"
+        lines.append(bit)
+
+    if not lines:
+        return _ok(f"nobody has been active in the last {args.since}")
+    body = "\n".join(lines)
+    print(body)
+    if args.post:
+        session.mirror(store, "standup", f"standup · {len(lines)} agent(s) active",
+                       body=body, channel="standup")
+        print()
+        print("posted to #standup")
+    return 0
+
+
 def cmd_review_load(store: Store, args: argparse.Namespace) -> int:
     """What a maintainer actually needs: how much agent work is queued at them.
 
@@ -1814,7 +2045,8 @@ def build_parser() -> argparse.ArgumentParser:
                             "handoff", "blocked", "review"])
     p.add_argument("--paths", nargs="*")
     p.add_argument("--task")
-    p.add_argument("--channel", default="link", choices=list(chat.CHANNELS))
+    p.add_argument("--channel", default="link",
+                   help="any channel from `colab channels`, including your own")
     p.add_argument("--needs-reply", action="store_true",
                    help="use only when genuinely blocked")
     p.add_argument("--reply-to")
@@ -1831,7 +2063,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("answer", help="answer a human in the chat room they asked in")
     p.add_argument("id")
     p.add_argument("text", nargs="+")
-    p.add_argument("--channel", choices=list(chat.CHANNELS))
+    p.add_argument("--channel", help="override where the answer goes")
     p.set_defaults(func=cmd_answer)
 
     p = sub.add_parser("inbox", help="unread messages")
@@ -1927,7 +2159,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--guild", help="Discord server id, for provision")
     p.add_argument("--minimal", action="store_true",
                    help="invite link without the channel-creation permissions")
-    p.add_argument("--channel", choices=list(chat.CHANNELS))
+    p.add_argument("--channel", help="channel name, for `test`")
     p.set_defaults(func=cmd_chat)
 
     p = sub.add_parser("wire", help="the compact agent-to-agent protocol")
@@ -1960,6 +2192,38 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("hook", help="internal: called by harness hooks")
     p.add_argument("event")
     p.set_defaults(func=cmd_hook, needs_store=False)
+
+    p = sub.add_parser("channels", help="every chat room, and what belongs in each")
+    p.add_argument("--full", action="store_true", help="include each channel's brief")
+    p.set_defaults(func=cmd_channels)
+
+    p = sub.add_parser("say", help="post a line to any channel, including your own")
+    p.add_argument("channel")
+    p.add_argument("text", nargs="*")
+    p.add_argument("--body", help="'-' reads stdin")
+    p.add_argument("--force", action="store_true", help="past the hourly budget")
+    p.set_defaults(func=cmd_say)
+
+    p = sub.add_parser("brief", help="what a channel is for, in its own words")
+    p.add_argument("channel")
+    p.set_defaults(func=cmd_brief)
+
+    p = sub.add_parser("issues", help="open GitHub issues, split deterministically")
+    p.add_argument("--limit", type=int, default=60)
+    p.add_argument("--show", type=int, default=12)
+    p.set_defaults(func=cmd_issues)
+
+    p = sub.add_parser("triage", help="record a triage decision, with the reasoning")
+    p.add_argument("issue")
+    p.add_argument("--as", dest="priority", required=True, choices=list(PRIORITIES))
+    p.add_argument("--why", required=True, help="published; a decision nobody can audit is not one")
+    p.add_argument("--plan", help="'-' reads stdin. Required for p0.")
+    p.set_defaults(func=cmd_triage)
+
+    p = sub.add_parser("standup", help="who did what, as a digest")
+    p.add_argument("--since", default="1d")
+    p.add_argument("--post", action="store_true", help="also post it to #standup")
+    p.set_defaults(func=cmd_standup)
 
     p = sub.add_parser("relay", help="mirror shared-ref activity into chat "
                                      "(for CI; contributors then need no tokens)")
