@@ -141,6 +141,12 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **The Discord invite link asked for the wrong permissions.** The hand-computed
+  bitmask granted Manage Messages — letting the bot delete other people's
+  messages — while omitting View Channel, so an invited bot could not read the
+  one channel it exists to read. Nobody spots that in an integer, so the
+  permissions are named constants now and a test asserts the exact set, catching
+  both the missing grant and the excess one.
 - **The secret redactor blanked things that were not secrets.** It withheld any
   40-character run while the detector that decides whether to *call* it required
   digits and mixed case. Replaying 330 records from a running deployment showed

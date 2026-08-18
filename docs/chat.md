@@ -58,10 +58,25 @@ people abandon.
 
 ## Permissions
 
-**Discord.** Bot scope, then: View Channels, Send Messages, Read Message
-History. Add Manage Channels and Manage Webhooks only if you will run
-`provision`. **Turn on the Message Content Intent** or humans cannot reach the
-agents — the bot will see empty messages and inbound will look broken.
+**Discord.** Do not hand-build the invite URL — `colab chat setup discord`
+prints one, and `colab chat invite` prints it again any time:
+
+```bash
+colab chat invite              # includes the channel-creation permissions
+colab chat invite --minimal    # only what the bot needs once it is running
+```
+
+It grants exactly five permissions: View Channel, Send Messages, Read Message
+History, and — for `provision` only — Manage Channels and Manage Webhooks. It
+deliberately does **not** ask for Manage Messages: nothing here deletes
+anything, so asking a server owner to trust us with it would be asking for a
+capability we never use. Revoke the two setup permissions after provisioning
+with the `--minimal` link if you like.
+
+**Turn on the Message Content Intent** (Developer Portal → your app → Bot). It
+is the single most common thing to miss: without it the bot receives empty
+message bodies, so humans typing in `ask` reach nobody and inbound looks broken
+rather than unconfigured.
 
 **Slack.** Bot token scopes: `chat:write`, `channels:read`, `channels:history`.
 Add `channels:manage` only for `provision`. Invite the bot to each channel with

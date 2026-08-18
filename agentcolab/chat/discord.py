@@ -175,13 +175,36 @@ class Discord(Adapter):
             return False, f"could not reach Discord ({exc})"
         return True, f"reading #{(channel or {}).get('name', '?')}"
 
-    def invite_hint(self) -> str:
+    # Named, because a hand-computed bitmask is unreviewable and this one was
+    # wrong: it granted MANAGE_MESSAGES -- letting the bot delete other people's
+    # messages -- while omitting VIEW_CHANNEL, so the invited bot could not read
+    # the one channel it exists to read. Nobody spots that in a integer.
+    PERM = {
+        "MANAGE_CHANNELS":      1 << 4,
+        "VIEW_CHANNEL":         1 << 10,
+        "SEND_MESSAGES":        1 << 11,
+        "READ_MESSAGE_HISTORY": 1 << 16,
+        "MANAGE_WEBHOOKS":      1 << 29,
+    }
+    # What the bot needs once it is running. Deliberately no MANAGE_MESSAGES:
+    # nothing here ever deletes anything, so asking for it is asking a server
+    # owner to trust us with a capability we do not use.
+    RUNTIME_PERMS = ("VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY")
+    # Additionally needed only while `provision` creates the channels. Safe to
+    # revoke afterwards, and `colab chat invite --minimal` prints the link that
+    # does not ask for them.
+    SETUP_PERMS = ("MANAGE_CHANNELS", "MANAGE_WEBHOOKS")
+
+    def permissions(self, *, provision: bool = True) -> int:
+        wanted = self.RUNTIME_PERMS + (self.SETUP_PERMS if provision else ())
+        return sum(self.PERM[name] for name in wanted)
+
+    def invite_hint(self, *, provision: bool = True) -> str:
         app = self.config.get("application_id")
         if not app:
             return ""
-        # View Channels + Send Messages + Read Message History + Manage Webhooks
         return (f"https://discord.com/oauth2/authorize?client_id={app}"
-                "&scope=bot&permissions=536963072")
+                f"&scope=bot&permissions={self.permissions(provision=provision)}")
 
     # -- provisioning -----------------------------------------------------
 

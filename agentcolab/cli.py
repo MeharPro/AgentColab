@@ -1049,6 +1049,17 @@ def cmd_chat(store: Store, args: argparse.Namespace) -> int:
                 print(f"  invite: {hint}")
         return 0
 
+    if args.action == "invite":
+        driver = args.driver or "discord"
+        adapter = chat.DRIVERS[driver](dict(chat_config.get(driver) or {}))
+        hint = (adapter.invite_hint(provision=not args.minimal)
+                if driver == "discord" else adapter.invite_hint())
+        if not hint:
+            eprint(f"colab: no application id set for {driver}. Run `colab chat setup "
+                   f"{driver}` first, or set it in ~/.agentcolab.")
+            return 1
+        return _ok(hint)
+
     if args.action == "off":
         config["chat"] = {}
         store.save_config(config)
@@ -1118,48 +1129,82 @@ def cmd_chat(store: Store, args: argparse.Namespace) -> int:
 
 
 def _chat_setup(store: Store, driver: str) -> int:
-    """Interactive so the token is typed by a human, never passed on a command line.
+    """A guided walkthrough, in the order the platform actually requires.
 
-    A token on a command line lands in shell history, in the process table, and
-    in whatever transcript the agent is writing. This prompt is hidden for
-    exactly that reason, and an agent should never run this on a human's behalf.
+    Interactive so the token is typed by a human and never passed on a command
+    line, where it would land in shell history, the process table, and whatever
+    transcript the agent is writing. An agent must not run this on somebody's
+    behalf.
+
+    The ordering matters and an earlier version had it wrong: you cannot
+    provision channels until the bot is in the server, and you cannot invite the
+    bot without its application id. So the id comes first, the invite URL is
+    printed the moment it can be, and provisioning is offered at the end rather
+    than left as a command to remember.
     """
     import getpass
+
+    if not sys.stdin.isatty():
+        eprint("colab: `chat setup` needs a terminal — it asks for a bot token, and a")
+        eprint("     token passed any other way ends up in shell history and transcripts.")
+        eprint("     Run it yourself in a terminal. An agent should not run it for you.")
+        return 1
 
     config = store.config()
     chat_config = dict(config.get("chat") or {})
     settings = dict(chat_config.get(driver) or {})
 
+    def ask(prompt: str, current: str = "") -> str:
+        got = input(f"   {prompt} [{current or 'unset'}]: ").strip()
+        return got or current
+
     if driver == "discord":
-        print("Discord setup. Enter blank to keep what is set.")
+        print("Discord setup. Three things to paste; blank keeps what is already set.")
         print()
-        print("1. Bot token — discord.com/developers → your app → Bot → Reset Token.")
-        print("   Needs: View Channels, Send Messages, Read Message History,")
-        print("   Manage Channels + Manage Webhooks only if you will run `provision`.")
-        print("   Turn ON the MESSAGE CONTENT INTENT or humans cannot reach the agents.")
-        print("   Stored in ~/.agentcolab, mode 600, never in the repo, never printed.")
+        print("If you have never made a Discord bot before, this is the whole thing:")
+        print("  1. https://discord.com/developers/applications → New Application")
+        print("  2. Bot (left sidebar) → Reset Token → copy it")
+        print("  3. On that same Bot page, turn ON  MESSAGE CONTENT INTENT")
+        print("     Without it the bot reads empty messages and humans cannot reach")
+        print("     your agents. It is the single most common thing to miss.")
+        print()
+        print("A. Application ID — General Information → Application ID.")
+        settings["application_id"] = ask("application id",
+                                         str(settings.get("application_id") or ""))
+        hint = chat.DRIVERS[driver](settings).invite_hint()
+        if hint:
+            print()
+            print("   Invite the bot to your server with this link, then come back:")
+            print(f"     {hint}")
+            input("   press enter once the bot is in your server… ")
+
+        print()
+        print("B. Bot token. Stored in ~/.agentcolab at mode 600, never in the repo,")
+        print("   never printed. Typed hidden.")
         token = getpass.getpass("   token (hidden): ").strip()
         if token:
             settings["token"] = token
+
         print()
-        print("2. Server id — right-click the server → Copy Server ID (Developer Mode on).")
-        guild = input(f"   server id [{settings.get('guild') or 'unset'}]: ").strip()
-        if guild:
-            settings["guild"] = guild
-        print()
-        print("3. Application id (optional, for the invite link).")
-        app = input(f"   application id [{settings.get('application_id') or 'unset'}]: ").strip()
-        if app:
-            settings["application_id"] = app
+        print("C. Server ID — enable Developer Mode (User Settings → Advanced),")
+        print("   then right-click the server icon → Copy Server ID.")
+        settings["guild"] = ask("server id", str(settings.get("guild") or ""))
     else:
-        print("Slack setup. Enter blank to keep what is set.")
+        print("Slack setup. Two things to paste; blank keeps what is already set.")
         print()
-        print("1. Bot token (xoxb-…) — api.slack.com/apps → OAuth & Permissions.")
-        print("   Scopes: chat:write, channels:read, channels:history")
-        print("   (+ channels:manage only if you will run `provision`).")
+        print("If you have never made a Slack app before:")
+        print("  1. https://api.slack.com/apps → Create New App → From scratch")
+        print("  2. OAuth & Permissions → Bot Token Scopes, add:")
+        print("       chat:write, channels:read, channels:history")
+        print("       (+ channels:manage only if you want `provision` to make channels)")
+        print("  3. Install to Workspace, then copy the Bot User OAuth Token (xoxb-…)")
+        print()
+        print("A. Bot token. Stored in ~/.agentcolab at mode 600, typed hidden.")
         token = getpass.getpass("   token (hidden): ").strip()
         if token:
             settings["token"] = token
+        print()
+        print("B. Remember to /invite your app into each channel it should post in.")
 
     chat_config[driver] = settings
     drivers = list(chat_config.get("drivers") or [])
@@ -1172,13 +1217,38 @@ def _chat_setup(store: Store, driver: str) -> int:
         os.chmod(store.config_path, 0o600)
 
     adapter = chat.DRIVERS[driver](settings)
-    ok, detail = adapter.verify()
     print()
-    print(f"{driver}: {'ready' if ok else 'not reading yet'} — {detail}")
-    if not (settings.get("channels")):
-        print()
-        print(f"No channels mapped yet. Create them all in one shot:")
-        print(f"  colab chat provision --driver {driver}")
+    if not settings.get("token"):
+        print("No token given, so this machine can mirror out but humans cannot reach")
+        print("the agents. Re-run when you have one.")
+        return 0
+
+    if not settings.get("channels"):
+        print("Creating the channels now — this needs Manage Channels on the bot.")
+        try:
+            table = adapter.provision(settings.get("guild") or "")
+        except Exception as exc:
+            eprint(f"colab: could not create channels — {exc}")
+            eprint("     Fix that, then:  colab chat provision --driver " + driver)
+            return 1
+        settings.update(adapter.config)
+        chat_config[driver] = settings
+        config["chat"] = chat_config
+        store.save_config(config)
+        print(f"created {len(table)} channel(s): " + ", ".join(sorted(table)))
+
+    ok, detail = adapter.verify()
+    print(f"{driver}: {'ready' if ok else 'NOT reading yet'} — {detail}")
+    if ok and session.mirror(store, "note", "AgentColab connected",
+                             body="If you can read this, the mirror works.",
+                             channel="link"):
+        print("posted a test message to #link — go and look at it")
+    print()
+    print("Share it with everyone else so nobody repeats this:")
+    print(f"  colab chat export > .agentcolab/agentcolab.json")
+    print( "  git add .agentcolab && git commit -m 'AgentColab: channel map'")
+    print()
+    print("That file carries channel ids only. Your token stays on this machine.")
     return 0
 
 
@@ -1850,10 +1920,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("chat", help="Discord / Slack bridge")
     p.add_argument("action", nargs="?", default="status",
-                   choices=["status", "setup", "provision", "pull", "test", "export", "off"])
+                   choices=["status", "setup", "invite", "provision", "pull", "test",
+                            "export", "off"])
     p.add_argument("driver", nargs="?", choices=list(chat.DRIVERS))
     p.add_argument("--driver", dest="driver_flag")
     p.add_argument("--guild", help="Discord server id, for provision")
+    p.add_argument("--minimal", action="store_true",
+                   help="invite link without the channel-creation permissions")
     p.add_argument("--channel", choices=list(chat.CHANNELS))
     p.set_defaults(func=cmd_chat)
 

@@ -262,6 +262,29 @@ class ChatAdapters(unittest.TestCase):
         adapter.provision("guild1")
         self.assertEqual(len(FakeAPI.created), first, "re-running made duplicates")
 
+    def test_the_invite_link_grants_exactly_what_is_needed(self):
+        # This shipped wrong: MANAGE_MESSAGES granted, VIEW_CHANNEL missing, so
+        # the invited bot could delete people's messages and read nothing.
+        adapter = self._discord(application_id="123")
+        url = adapter.invite_hint()
+        perms = int(url.split("permissions=")[1].split("&")[0])
+        for name in ("VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY",
+                     "MANAGE_CHANNELS", "MANAGE_WEBHOOKS"):
+            self.assertTrue(perms & discord.Discord.PERM[name], f"missing {name}")
+        self.assertFalse(perms & (1 << 13), "asks for MANAGE_MESSAGES, which is never used")
+        self.assertFalse(perms & (1 << 3), "asks for ADMINISTRATOR")
+        self.assertIn("scope=bot", url)
+
+    def test_no_application_id_means_no_invite_link_rather_than_a_broken_one(self):
+        self.assertEqual(self._discord().invite_hint(), "")
+
+    def test_the_minimal_invite_drops_the_setup_permissions(self):
+        adapter = self._discord(application_id="123")
+        perms = adapter.permissions(provision=False)
+        self.assertTrue(perms & discord.Discord.PERM["VIEW_CHANNEL"])
+        self.assertFalse(perms & discord.Discord.PERM["MANAGE_CHANNELS"])
+        self.assertFalse(perms & discord.Discord.PERM["MANAGE_WEBHOOKS"])
+
     def test_verify_distinguishes_a_bad_token_from_a_quiet_channel(self):
         ok, detail = self._discord(token="").verify()
         self.assertFalse(ok)
