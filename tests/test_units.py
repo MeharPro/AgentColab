@@ -196,6 +196,39 @@ class DeterministicOwnership(unittest.TestCase):
         self.assertEqual(board.resolve_take(holders)["agent"], "alice")
         self.assertEqual(board.resolve_take(list(reversed(holders)))["agent"], "alice")
 
+    def test_the_deal_never_hands_two_agents_the_same_task(self):
+        # Ownership alone does not deal evenly — with six tasks and four agents
+        # it is ordinary for an agent to own none — and every ownerless agent
+        # falling back to "whatever is first" picks the same one.
+        roster = ["alice", "bob", "carol", "dave"]
+        for count in (1, 2, 3, 4, 6, 9, 20):
+            ready = [{"id": f"t-{count}-{i}", "priority": "p1"} for i in range(count)]
+            got = board.deal(ready, roster)
+            picks = [t["id"] for t in got.values()]
+            with self.subTest(tasks=count):
+                self.assertEqual(len(picks), len(set(picks)), "two agents got one task")
+                self.assertLessEqual(len(picks), count)
+
+    def test_an_agent_with_nothing_dealt_is_offered_nothing(self):
+        # Better than piling a third agent onto work two others are sorting out.
+        roster = ["alice", "bob", "carol", "dave"]
+        got = board.deal([{"id": "t-1", "priority": "p1"}], roster)
+        self.assertEqual(len(got), 1)
+
+    def test_every_machine_computes_the_same_deal(self):
+        roster = ["alice", "bob", "carol"]
+        ready = [{"id": f"t-{i}", "priority": "p2"} for i in range(7)]
+        first = board.deal(ready, roster)
+        for _ in range(20):
+            self.assertEqual(board.deal(list(ready), sorted(roster)), first)
+
+    def test_priority_still_leads_the_deal(self):
+        roster = ["alice", "bob"]
+        ready = [{"id": "t-low", "priority": "p3"}, {"id": "t-hi", "priority": "p0"},
+                 {"id": "t-mid", "priority": "p2"}]
+        picks = [t["id"] for t in board.deal(ready, roster).values()]
+        self.assertIn("t-hi", picks)
+
     def test_a_tie_is_broken_by_name_not_by_luck(self):
         holders = [{"agent": "zed", "created_at": "2026-01-01T00:00:01Z"},
                    {"agent": "amy", "created_at": "2026-01-01T00:00:01Z"}]

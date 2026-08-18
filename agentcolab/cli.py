@@ -404,8 +404,14 @@ def cmd_next(store: Store, args: argparse.Namespace) -> int:
     session.refresh_if_stale(store, force=not args.offline)
     task = board.next_for(store)
     if not task:
-        print("nothing open on the board.")
-        print("Add work with `colab task \"<title>\"`, or just do what your human asked.")
+        if board.open_tasks(store):
+            print("nothing for you right now — every open task is already dealt to")
+            print("another live agent. That is the mechanism working, not a fault.")
+            print("  colab board            see who has what")
+            print('  colab task "<title>"   add work if you have some')
+        else:
+            print("nothing open on the board.")
+            print('Add work with `colab task "<title>"`, or just do what your human asked.')
         return 0
     roster = board.live_agents(store)
     owner = board.owner_of(str(task.get("id")), roster)

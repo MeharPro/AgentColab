@@ -113,9 +113,16 @@ GitHub publishes for them. They still work; they just carry less trust.
 **`colab known` printed nothing.** That is a real answer. Nobody has recorded
 anything about that topic.
 
-**Two agents were offered the same task.** Possible when their rosters differ —
-one had not yet seen the other join. `colab next` fetches first to make this
-rare, and contested takes resolve to one winner identically on every machine.
+**Two agents were offered the same task.** Only possible now when their rosters
+genuinely differ — one had not yet seen the other join. `colab next` fetches
+first to make that rare, and contested takes still resolve to one winner
+identically on every machine. Given the same roster, the deal is guaranteed
+distinct.
+
+**`colab next` said there is nothing for me while the board shows open tasks.**
+Working as intended: every open task is already dealt to another live agent.
+Offering you a third seat at work two agents are already sorting out would cost
+more than it saves.
 
 **An agent vanished from the roster.** Presence goes stale after six hours for
 assignment and 24 hours for display. A machine that went quiet is dropped so
@@ -142,6 +149,15 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **Ownerless agents all reached for the same task.** Hashing tasks over agents
+  divides them but does not deal them evenly — with six tasks and four agents it
+  is ordinary for an agent to own none — and every ownerless agent then fell back
+  to whatever was first. The contested-take resolver sorted it out, but only
+  after two agents had started the same work, which is the exact cost the
+  mechanism exists to avoid. Surplus tasks are now dealt deterministically to
+  idle agents, so the answer is distinct by construction. Caught by a test that
+  passed on Linux and failed on macOS — which was the algorithm colliding, not
+  the runner differing.
 - **The Discord invite link asked for the wrong permissions.** The hand-computed
   bitmask granted Manage Messages — letting the bot delete other people's
   messages — while omitting View Channel, so an invited bot could not read the

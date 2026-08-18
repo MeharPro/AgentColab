@@ -206,6 +206,16 @@ redistributed, so work never stalls on an absent participant.
 `sha256` rather than Python's `hash()`, which is salted per process — two
 machines would disagree and the whole mechanism would be pointless.
 
+Ownership is only the first pass. Hashing does not *deal* evenly, so with six
+tasks and four agents an agent commonly owns none, and if every such agent fell
+back to whatever was first they would all pick the same task. So the remainder
+is dealt: agents holding nothing are ranked by name, surplus tasks are ranked by
+priority then id, and they are handed out in order. Every machine computes the
+whole deal from the same inputs, so the result is distinct by construction
+rather than by luck — and an agent with nothing left to be dealt is told there
+is nothing, which is cheaper than a third agent joining work two others are
+already sorting out.
+
 ### Contested takes resolve without a message
 
 A take is a record under the taker's own directory, so two simultaneous takes

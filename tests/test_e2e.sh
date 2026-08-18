@@ -74,7 +74,10 @@ for d in alice bob carol dave; do
   PICKS+=("$(colab next 2>/dev/null | head -1 | awk '{print $1}')")
 done
 uniq_count=$(printf '%s\n' "${PICKS[@]}" | sort -u | wc -l | tr -d ' ')
-if [ "$uniq_count" -ge 3 ]; then ok "4 agents were offered $uniq_count distinct tasks"
+# Four agents, six tasks: the deal must give four distinct answers, not "mostly".
+# An earlier version asserted >=3 and passed on Linux while failing on macOS,
+# which was the algorithm colliding, not the runner differing.
+if [ "$uniq_count" -eq 4 ]; then ok "4 agents were offered 4 distinct tasks"
 else bad "4 agents were offered $uniq_count distinct tasks" "${PICKS[*]}"; fi
 
 cd "$WORK/alice"; T1="${PICKS[0]}"

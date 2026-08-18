@@ -191,19 +191,54 @@ def open_tasks(store: Store) -> list[dict[str, Any]]:
     return ready
 
 
-def next_for(store: Store, agent: str | None = None) -> dict[str, Any] | None:
-    """The single task this agent should pick up, with nobody consulted.
+def deal(ready: list[dict[str, Any]], roster: list[str]) -> dict[str, dict[str, Any]]:
+    """Assign at most one ready task to each live agent. Same answer everywhere.
 
-    Two passes on purpose. First: tasks this agent deterministically owns, so
-    parallel agents never collide. Only if it owns none does it fall back to
-    the general pool — which is what makes a two-agent project work as well as
-    a twenty-agent one.
+    Hashing tasks over agents divides them but does not deal them evenly: with
+    six tasks and four agents it is ordinary for an agent to own none. The
+    obvious fallback -- an ownerless agent takes whatever is first -- means every
+    ownerless agent takes the *same* task. The contested-take resolver sorts
+    that out, but only after two agents have already started the same work,
+    which is the exact cost this mechanism exists to avoid.
+
+    So ownership is a first pass, and what is left over is dealt: agents holding
+    nothing are ranked by name, surplus tasks (everything past each owner's
+    first) are ranked by priority then id, and they are handed out in order.
+    Every machine computes the whole deal from the same inputs, so no agent
+    needs to be told which part of it is theirs.
+
+    An agent with nothing left to be dealt gets nothing, deliberately. Piling a
+    third agent onto a task two others are already sorted over is worse than
+    saying there is no work.
     """
+    by_owner: dict[str, list[dict[str, Any]]] = {}
+    for task in ready:
+        by_owner.setdefault(owner_of(str(task.get("id")), roster), []).append(task)
+
+    assigned: dict[str, dict[str, Any]] = {}
+    for who, tasks in by_owner.items():
+        if who in roster and tasks:
+            assigned[who] = tasks[0]
+
+    idle = sorted(a for a in roster if a not in assigned)
+    if not idle:
+        return assigned
+
+    surplus = [t for who in sorted(by_owner) for t in by_owner[who][1:]]
+    surplus.sort(key=lambda t: (PRIORITIES.get(str(t.get("priority")), 2),
+                                str(t.get("id"))))
+    for agent, task in zip(idle, surplus):
+        assigned[agent] = task
+    return assigned
+
+
+def next_for(store: Store, agent: str | None = None) -> dict[str, Any] | None:
+    """The single task this agent should pick up, with nobody consulted."""
     me = agent or store.agent
-    roster = live_agents(store)
     ready = open_tasks(store)
-    mine = [t for t in ready if owner_of(str(t.get("id")), roster) == me]
-    return (mine or ready or [None])[0]
+    if not ready:
+        return None
+    return deal(ready, live_agents(store)).get(me)
 
 
 def my_work(store: Store) -> list[dict[str, Any]]:
