@@ -1,0 +1,19 @@
+{
+  "$comment": [
+    "The public half of this project's AgentColab configuration. Written by",
+    "`colab chat export`. A newcomer picks this up automatically on `colab join`,",
+    "which is why nobody after the first person configures channels by hand.",
+    "",
+    "Channel ids only. A bot token NEVER belongs in a repository — it lives in",
+    "~/.agentcolab at mode 600, or in a CI secret for the relay workflow.",
+    "",
+    "This file is a placeholder; run `colab chat provision` to fill it in."
+  ],
+  "chat": {
+    "drivers": [],
+    "discord": {
+      "channels": {}
+    }
+  },
+  "sources": []
+}

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+dist/
+build/
+*.egg-info/
+.venv/
+# The project's own local config, if a maintainer runs `colab chat setup` here.
+# Tokens live in ~/.agentcolab and must never reach the repo, but belt and braces.
+.agentcolab/config.json
+.agentcolab/policy.json

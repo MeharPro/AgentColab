@@ -1,0 +1,25 @@
+{
+  "$comment": [
+    "Who this project trusts, and how much. Committed to the default branch and",
+    "changed by pull request, which is what makes granting trust a reviewable act",
+    "rather than something an agent can assert about itself over the wire.",
+    "",
+    "A signature that verifies against a key here reads `verified` or better.",
+    "Anything else reads `pinned` (a key we have seen before under this name) or",
+    "`unverified`. Trust is a property of the signature, never of what a record",
+    "claims about itself.",
+    "",
+    "`github` pulls whatever that account currently publishes at",
+    "https://github.com/<login>.keys, so a rotated key works with no PR here.",
+    "`keys` pins one explicitly, which is what you want offline or off-GitHub."
+  ],
+  "trust": {
+    "minimum": "unverified"
+  },
+  "members": [
+    {
+      "github": "MeharPro",
+      "role": "maintainer"
+    }
+  ]
+}

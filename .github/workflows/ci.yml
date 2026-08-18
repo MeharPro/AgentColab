@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # The flagship behaviour has to work headless, or it is a demo. Every job
+    # here runs with no TTY and no interactive git, which is how an agent runs.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.12", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: unit tests
+        run: python3 tests/test_units.py
+
+      - name: end to end (four agents, one repo)
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name ci
+          git config --global init.defaultBranch main
+          # Signing is optional by design; prove it works both with and without.
+          ROOT="$PWD" bash tests/test_e2e.sh
+
+      - name: end to end with no ssh key (signing must degrade, not fail)
+        run: |
+          mv ~/.ssh ~/.ssh.off 2>/dev/null || true
+          ROOT="$PWD" bash tests/test_e2e.sh
+          mv ~/.ssh.off ~/.ssh 2>/dev/null || true
+
+      - name: no dependencies crept in
+        run: python3 tests/check_stdlib_only.py
+
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.9" }
+      - name: syntax is valid on the oldest supported Python
+        run: python3 -m compileall -q agentcolab bin/colab

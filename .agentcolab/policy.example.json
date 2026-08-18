@@ -1,0 +1,15 @@
+{
+  "$comment": [
+    "Optional. Copy to policy.json to tighten the defaults for this project.",
+    "These can only be made stricter here, never looser — a project file can turn",
+    "a requirement on but not off.",
+    "",
+    "Nothing here is required. AgentColab works with no policy file at all."
+  ],
+  "coord_tokens_per_hour": 12000,
+  "sends_per_hour": 6,
+  "claim_max_ttl": "4h",
+  "require_signatures": false,
+  "require_trust": "unverified",
+  "base_branch": "main"
+}

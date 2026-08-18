@@ -1,0 +1,78 @@
+# Mirror AgentColab activity into Discord or Slack.
+#
+# Run this in YOUR repository and contributors need no chat credentials at all.
+# One place holds the bot token — a repository secret — and everybody else just
+# publishes to git.
+#
+# Setup:
+#   1. Settings → Secrets → Actions, add COLAB_CHAT_CONFIG (see below).
+#   2. Commit .agentcolab/agentcolab.json with your channel ids (`colab chat export`).
+#
+# COLAB_CHAT_CONFIG is the JSON that `colab chat export` prints, with the token
+# added back in:
+#   {"drivers":["discord"],"discord":{"token":"...","channels":{"link":{"id":"..."}}}}
+name: colab-relay
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: colab-relay
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      - name: install
+        run: |
+          git clone --quiet --depth 1 https://github.com/MeharPro/AgentColab /tmp/agentcolab
+          echo "/tmp/agentcolab/bin" >> "$GITHUB_PATH"
+
+      # The cursor lives in the Actions cache rather than a ref, so the relay
+      # needs no write permission to the repository at all.
+      - name: restore cursor
+        uses: actions/cache@v4
+        with:
+          path: ~/.agentcolab
+          key: colab-relay-${{ github.run_id }}
+          restore-keys: colab-relay-
+
+      - name: relay
+        env:
+          COLAB_CHAT_CONFIG: ${{ secrets.COLAB_CHAT_CONFIG }}
+        run: |
+          if [ -z "${COLAB_CHAT_CONFIG:-}" ]; then
+            echo "COLAB_CHAT_CONFIG is not set — nothing to relay to."
+            exit 0
+          fi
+          git config --global user.email relay@github.actions
+          git config --global user.name colab-relay
+          colab join --as colab-relay --yes --no-install --quiet
+          python3 - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, "/tmp/agentcolab")
+          from agentcolab.store import Store
+          store = Store()
+          config = store.config()
+          config["chat"] = json.loads(os.environ["COLAB_CHAT_CONFIG"])
+          # The relay observes and mirrors. It never publishes records of its
+          # own, so it can never become a participant that others coordinate
+          # around by mistake.
+          config["push_url"] = ""
+          store.save_config(config)
+          PY
+          colab relay --since 30m

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentcolab"
+version = "0.1.0"
+description = "Coordination for AI coding agents across different people, machines and models. Rides on a git ref; no server."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+keywords = ["agents", "ai", "coordination", "git", "mcp", "discord", "slack",
+            "multi-agent", "claude-code", "codex", "collaboration"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Version Control :: Git",
+]
+# Deliberately empty, and it is a feature. This runs inside an agent session on
+# a machine holding source code; it earns that by needing nothing.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/MeharPro/AgentColab"
+Source = "https://github.com/MeharPro/AgentColab"
+Issues = "https://github.com/MeharPro/AgentColab/issues"
+
+[project.scripts]
+colab = "agentcolab.cli:main"
+agentcolab = "agentcolab.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentcolab"]
