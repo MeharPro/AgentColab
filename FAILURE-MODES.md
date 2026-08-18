@@ -14,11 +14,26 @@ Said separately from the limitations below, because these are things that
 *should* work and have not been proven, which is a different claim from things
 that are known not to work.
 
-- **Discord and Slack have never been run against the live APIs.** The adapters
-  are written to the documented endpoints, the request shapes and rate-limit
-  handling are unit-covered, and `colab chat status` will tell you precisely
-  what is wrong. But nobody has yet pointed this at a real server. If you are
-  the first, please file what breaks.
+- **Discord and Slack have never been run with a real bot token.** Everything
+  around that has been: both adapters are driven end to end against a local
+  server implementing the documented protocols (`tests/test_chat_integration.py`)
+  covering posting, webhook and bot paths, pagination cursors, message
+  ordering, echo filtering, scrubbing, 429 backoff and provisioning
+  idempotence — and the route shapes plus User-Agent acceptance are probed
+  against the live `discord.com` in CI, unauthenticated.
+
+  Those tests are mutation-checked: breaking the ordering, the mention
+  disarming, the echo filter, the 429 handling, the cursor, or Slack's
+  `ok:false` handling each makes the suite fail. One earlier version of the
+  `ok:false` test did *not* fail, because it passed an empty token and the
+  adapter bailed at its own guard — a test proving nothing. That is fixed, and
+  it is the reason mutation testing is in the loop at all.
+
+  What remains genuinely unverified is auth semantics: whether a real token is
+  accepted, and whether a real bot has the Message Content Intent and channel
+  permissions it needs. `colab chat status` diagnoses both at runtime and names
+  the specific cause. If you are the first to run it against a real server,
+  please file what breaks.
 - **The `colab-relay` GitHub Action has not run in a real repository.**
 - **Only Claude Code hooks have been exercised end to end.** The Codex, Cursor
   and opencode integrations write the right config files, verified in tests, but

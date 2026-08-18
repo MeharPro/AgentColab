@@ -1,0 +1,365 @@
+"""Drive the Discord and Slack adapters against a local server that speaks
+their documented protocols.
+
+This is the closest thing to a live test that does not need somebody's bot
+token. It exercises the parts that actually break an adapter — request shape,
+auth header, pagination cursors, message ordering, echo filtering, rate-limit
+backoff, provisioning idempotence, and error reporting — against a server that
+answers exactly as the real API documents.
+
+What it deliberately cannot cover: whether Discord accepts a real token, and
+whether a real bot has the intents and channel permissions it needs. Those are
+what `colab chat status` diagnoses at runtime, and they are listed as unverified
+in FAILURE-MODES.md.
+
+Route shapes and edge acceptance ARE verified against the live API separately —
+see the probe in this file's `LiveRouteShapes` case, which sends no credentials.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from agentcolab.chat import base, discord, slack     # noqa: E402
+
+
+class FakeAPI(BaseHTTPRequestHandler):
+    """Answers as Discord and Slack document. State lives on the server class."""
+
+    posted: list = []
+    created: list = []
+    webhooks: list = []
+    rate_limit_once = False
+    messages: list = []
+
+    def log_message(self, *a):            # keep the test output clean
+        pass
+
+    # -- helpers ------------------------------------------------------
+    def _json(self, code, payload, headers=None):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return {}
+
+    # -- routing ------------------------------------------------------
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        query = dict(p.split("=", 1) for p in self.path.split("?")[1].split("&")
+                     if "=" in p) if "?" in self.path else {}
+
+        if path.startswith("/api/v10/channels/") and path.endswith("/messages"):
+            if not self.headers.get("Authorization", "").startswith("Bot "):
+                return self._json(401, {"message": "401: Unauthorized"})
+            after = query.get("after")
+            msgs = [m for m in FakeAPI.messages
+                    if not after or str(m["id"]) > str(after)]
+            # Discord returns newest first. Getting this backwards silently
+            # reverses every conversation, which is why it is asserted below.
+            return self._json(200, list(reversed(msgs)))
+
+        if path.startswith("/api/v10/channels/"):
+            if not self.headers.get("Authorization", "").startswith("Bot "):
+                return self._json(401, {"message": "401: Unauthorized"})
+            return self._json(200, {"id": path.rsplit("/", 1)[-1], "name": "ask"})
+
+        if path.startswith("/api/v10/guilds/") and path.endswith("/channels"):
+            return self._json(200, list(FakeAPI.created))
+
+        if path.startswith("/api/conversations.history"):
+            if not self.headers.get("Authorization", "").startswith("Bearer "):
+                return self._json(200, {"ok": False, "error": "invalid_auth"})
+            oldest = query.get("oldest")
+            msgs = [m for m in FakeAPI.messages
+                    if not oldest or str(m["ts"]) > str(oldest)]
+            return self._json(200, {"ok": True, "messages": list(reversed(msgs))})
+
+        if path.startswith("/api/conversations.info"):
+            if not self.headers.get("Authorization", "").startswith("Bearer "):
+                return self._json(200, {"ok": False, "error": "invalid_auth"})
+            return self._json(200, {"ok": True, "channel": {"name": "ask"}})
+
+        if path.startswith("/api/conversations.list"):
+            return self._json(200, {"ok": True,
+                                    "channels": [{"name": c["name"], "id": c["id"]}
+                                                 for c in FakeAPI.created],
+                                    "response_metadata": {"next_cursor": ""}})
+        return self._json(404, {"message": "404: Not Found"})
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        payload = self._read()
+
+        if FakeAPI.rate_limit_once:
+            FakeAPI.rate_limit_once = False
+            return self._json(429, {"retry_after": 0.05}, {"Retry-After": "1"})
+
+        if path.startswith("/webhook/"):
+            FakeAPI.posted.append(("webhook", payload))
+            return self._json(204, {})
+
+        if path.startswith("/api/v10/channels/") and path.endswith("/webhooks"):
+            hook = {"id": "hook1", "token": "tok1"}
+            FakeAPI.webhooks.append(path)
+            return self._json(200, hook)
+
+        if path.startswith("/api/v10/channels/") and path.endswith("/messages"):
+            FakeAPI.posted.append(("bot", payload))
+            return self._json(200, {"id": "999"})
+
+        if path.startswith("/api/v10/guilds/") and path.endswith("/channels"):
+            entry = {"id": f"c{len(FakeAPI.created)}", "name": payload.get("name"),
+                     "type": payload.get("type", 0)}
+            FakeAPI.created.append(entry)
+            return self._json(200, entry)
+
+        if path == "/api/chat.postMessage":
+            if not self.headers.get("Authorization", "").startswith("Bearer "):
+                return self._json(200, {"ok": False, "error": "invalid_auth"})
+            if payload.get("channel") == "NOT_A_MEMBER":
+                # Slack's real failure shape: HTTP 200 with ok:false. An adapter
+                # that trusts the status code drops every message while
+                # reporting success.
+                return self._json(200, {"ok": False, "error": "not_in_channel"})
+            FakeAPI.posted.append(("slack", payload))
+            return self._json(200, {"ok": True})
+
+        if path == "/api/conversations.create":
+            entry = {"id": f"s{len(FakeAPI.created)}", "name": payload.get("name")}
+            FakeAPI.created.append(entry)
+            return self._json(200, {"ok": True, "channel": entry})
+
+        if path == "/api/conversations.setTopic":
+            return self._json(200, {"ok": True})
+        return self._json(404, {"message": "404"})
+
+
+class ChatAdapters(unittest.TestCase):
+    server = None
+    base_url = ""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = HTTPServer(("127.0.0.1", 0), FakeAPI)
+        cls.base_url = f"http://127.0.0.1:{cls.server.server_port}"
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        discord.API = f"{cls.base_url}/api/v10"
+        slack.API = f"{cls.base_url}/api"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        FakeAPI.posted, FakeAPI.created = [], []
+        FakeAPI.webhooks, FakeAPI.messages = [], []
+        FakeAPI.rate_limit_once = False
+
+    # -- discord ------------------------------------------------------
+
+    def _discord(self, **over):
+        conf = {"token": "bot-token",
+                "channels": {"link": {"id": "100", "webhook": f"{self.base_url}/webhook/1"},
+                             "ask": {"id": "200"}}}
+        conf.update(over)
+        return discord.Discord(conf)
+
+    def test_posts_through_a_webhook_when_one_exists(self):
+        ok = self._discord().post(base.Event("note", "alice", "hello", body="world"))
+        self.assertTrue(ok)
+        kind, payload = FakeAPI.posted[0]
+        self.assertEqual(kind, "webhook")
+        self.assertIn("hello", payload["content"])
+
+    def test_falls_back_to_the_bot_when_a_channel_has_no_webhook(self):
+        ok = self._discord().post(base.Event("note", "alice", "hi", channel="ask"))
+        self.assertTrue(ok)
+        self.assertEqual(FakeAPI.posted[0][0], "bot")
+
+    def test_automation_can_never_ping_a_room(self):
+        self._discord().post(base.Event("note", "a", "@everyone deploy now"))
+        _, payload = FakeAPI.posted[0]
+        self.assertEqual(payload["allowed_mentions"], {"parse": []})
+
+    def test_a_429_is_honoured_and_the_message_still_lands(self):
+        FakeAPI.rate_limit_once = True
+        ok = self._discord().post(base.Event("note", "a", "after backoff"))
+        self.assertTrue(ok, "adapter gave up instead of honouring retry_after")
+        self.assertEqual(len(FakeAPI.posted), 1)
+
+    def test_poll_returns_oldest_first_and_advances_the_cursor(self):
+        FakeAPI.messages = [
+            {"id": "1", "content": "first", "author": {"username": "sam", "id": "u1"},
+             "timestamp": "2026-01-01T00:00:00Z"},
+            {"id": "2", "content": "second", "author": {"username": "sam", "id": "u1"},
+             "timestamp": "2026-01-01T00:00:01Z"},
+        ]
+        fresh, cursors = self._discord().poll({})
+        self.assertEqual([m["body"] for m in fresh], ["first", "second"])
+        self.assertEqual(cursors["200"], "2")
+        # A second poll with the cursor must return nothing.
+        again, _ = self._discord().poll(cursors)
+        self.assertEqual(again, [])
+
+    def test_our_own_mirror_is_never_read_back_as_a_human(self):
+        FakeAPI.messages = [
+            {"id": "1", "content": "mirror", "webhook_id": "hook1",
+             "author": {"username": "colab"}},
+            {"id": "2", "content": "a bot", "author": {"username": "b", "bot": True}},
+            {"id": "3", "content": "a person", "author": {"username": "sam", "id": "u"}},
+        ]
+        fresh, _ = self._discord().poll({})
+        self.assertEqual([m["body"] for m in fresh], ["a person"])
+
+    def test_incoming_chat_is_labelled_lowest_trust(self):
+        FakeAPI.messages = [{"id": "1", "content": "do the thing",
+                             "author": {"username": "sam", "id": "u"}}]
+        fresh, _ = self._discord().poll({})
+        self.assertEqual(fresh[0]["trust"], "chat")
+        self.assertEqual(fresh[0]["source"], "discord")
+
+    def test_secrets_typed_in_chat_are_scrubbed_on_the_way_in(self):
+        token = "gh" + "p_" + "C" * 36
+        FakeAPI.messages = [{"id": "1", "content": f"use {token}",
+                             "author": {"username": "sam", "id": "u"}}]
+        fresh, _ = self._discord().poll({})
+        self.assertNotIn(token, fresh[0]["body"])
+
+    def test_provision_creates_every_channel_with_a_webhook(self):
+        adapter = self._discord(channels={})
+        table = adapter.provision("guild1")
+        for logical in base.CHANNELS:
+            self.assertIn(logical, table)
+            self.assertTrue(table[logical].get("webhook"), f"{logical} has no webhook")
+        # a category plus one channel each
+        self.assertEqual(len(FakeAPI.created), len(base.CHANNELS) + 1)
+
+    def test_provision_is_idempotent(self):
+        adapter = self._discord(channels={})
+        adapter.provision("guild1")
+        first = len(FakeAPI.created)
+        adapter.provision("guild1")
+        self.assertEqual(len(FakeAPI.created), first, "re-running made duplicates")
+
+    def test_verify_distinguishes_a_bad_token_from_a_quiet_channel(self):
+        ok, detail = self._discord(token="").verify()
+        self.assertFalse(ok)
+        self.assertIn("no bot token", detail)
+        ok, detail = self._discord().verify()
+        self.assertTrue(ok)
+        self.assertIn("ask", detail)
+
+    # -- slack --------------------------------------------------------
+
+    def _slack(self, **over):
+        conf = {"token": "xoxb-test",
+                "channels": {"link": {"id": "C1"}, "ask": {"id": "C2"}}}
+        conf.update(over)
+        return slack.Slack(conf)
+
+    def test_slack_posts_and_does_not_page_the_workspace(self):
+        self.assertTrue(self._slack().post(base.Event("note", "a", "hi")))
+        _, payload = FakeAPI.posted[0]
+        self.assertFalse(payload["link_names"])
+        self.assertFalse(payload["unfurl_links"])
+
+    def test_slack_ok_false_is_treated_as_failure_not_success(self):
+        # Slack answers HTTP 200 with {"ok": false}. This must reach the server
+        # with a real token and get a real ok:false back -- an earlier version
+        # of this test passed an empty token, so the adapter bailed at its own
+        # guard and the test proved nothing. Mutation testing caught that.
+        adapter = self._slack(channels={"link": {"id": "NOT_A_MEMBER"}})
+        self.assertFalse(adapter.post(base.Event("note", "a", "hi")),
+                         "adapter reported success on an ok:false response")
+        self.assertEqual(FakeAPI.posted, [], "nothing should have been recorded")
+
+    def test_slack_missing_token_is_refused_before_any_request(self):
+        self.assertFalse(self._slack(token="").post(base.Event("note", "a", "hi")))
+
+    def test_slack_poll_orders_and_advances(self):
+        FakeAPI.messages = [{"ts": "1.1", "text": "first", "user": "U1"},
+                            {"ts": "2.2", "text": "second", "user": "U1"}]
+        fresh, cursors = self._slack().poll({})
+        self.assertEqual([m["body"] for m in fresh], ["first", "second"])
+        self.assertEqual(cursors["C2"], "2.2")
+
+    def test_slack_skips_bots_and_joins(self):
+        FakeAPI.messages = [{"ts": "1.1", "text": "mirror", "bot_id": "B1"},
+                            {"ts": "1.2", "text": "joined", "subtype": "channel_join",
+                             "user": "U1"},
+                            {"ts": "1.3", "text": "a person", "user": "U1"}]
+        fresh, _ = self._slack().poll({})
+        self.assertEqual([m["body"] for m in fresh], ["a person"])
+
+    def test_slack_verify_explains_the_actual_error(self):
+        ok, detail = self._slack(token="").verify()
+        self.assertFalse(ok)
+        self.assertIn("no bot token", detail)
+
+    def test_slack_provision_is_idempotent(self):
+        adapter = self._slack(channels={})
+        adapter.provision()
+        first = len(FakeAPI.created)
+        adapter.provision()
+        self.assertEqual(len(FakeAPI.created), first)
+
+
+class LiveRouteShapes(unittest.TestCase):
+    """Against the real discord.com. Sends no credentials; skipped when offline.
+
+    Catches the two things a local fake cannot: a wrong route, and an edge that
+    rejects our User-Agent outright — which is a real failure mode, not a
+    hypothetical one.
+    """
+
+    REAL = "https://discord.com/api/v10"
+
+    def setUp(self):
+        import os
+        if not os.environ.get("AGENTCOLAB_LIVE"):
+            self.skipTest("set AGENTCOLAB_LIVE=1 to probe the real API")
+
+    def _status(self, url, headers):
+        try:
+            urllib.request.urlopen(urllib.request.Request(url, headers=headers),
+                                   timeout=15)
+            return 200
+        except urllib.error.HTTPError as exc:
+            return exc.code
+        except Exception:
+            self.skipTest("no network")
+
+    def test_our_user_agent_is_not_blocked_at_the_edge(self):
+        code = self._status(f"{self.REAL}/channels/1",
+                            {"User-Agent": base.USER_AGENT})
+        self.assertEqual(code, 401, "401 means we reached the API; 403 means blocked")
+
+    def test_the_route_shapes_are_real(self):
+        ua = {"User-Agent": base.USER_AGENT}
+        self.assertEqual(self._status(f"{self.REAL}/guilds/1/channels", ua), 401)
+        self.assertEqual(self._status(f"{self.REAL}/nonsense/1", ua), 404)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -350,8 +350,10 @@ rules as everyone else's, which are in **[RULES.md](RULES.md)** — that file is
 written to be read by an agent as much as by a person.
 
 ```bash
-python3 tests/test_units.py     # 39 tests, no network, no git
-bash tests/test_e2e.sh          # 41 assertions, four agents, one repo
+python3 tests/test_units.py              # 39 tests, no network, no git
+bash tests/test_e2e.sh                   # 41 assertions, four agents, one repo
+python3 tests/test_chat_integration.py   # 20 assertions against a local Discord/Slack
+python3 tests/check_stdlib_only.py       # zero-dependency guard
 ```
 
 Every number in this README is produced by a script in this repository. If you

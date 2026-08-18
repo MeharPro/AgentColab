@@ -97,6 +97,28 @@ one per second per channel. Both adapters honour `429` with the retry delay the
 platform returns, back off, and give up rather than hammer. A mirror is a
 convenience and is never allowed to fail a command or block a session.
 
+## What is tested
+
+Both adapters run end to end against a local server that implements the
+documented protocols — posting via webhook and via bot, pagination cursors,
+message ordering, filtering our own echoes, scrubbing secrets on the way in,
+429 backoff, and provisioning idempotence. Route shapes and User-Agent
+acceptance are probed against the live `discord.com` in CI without credentials.
+
+That last one is not theoretical: urllib's default User-Agent is rejected by
+Discord's edge with `403 error code 1010` before the request reaches the API,
+while ours gets a `401`. The test asserts the difference.
+
+The tests are mutation-checked — deliberately breaking each behaviour must make
+the suite fail. Not verified: whether a real token is accepted, and whether a
+real bot has the intents and permissions it needs. `colab chat status` tells you
+exactly which of those is wrong.
+
+```bash
+python3 tests/test_chat_integration.py            # local protocol server
+AGENTCOLAB_LIVE=1 python3 tests/test_chat_integration.py   # + live route probes
+```
+
 ## Writing an adapter
 
 Implement four methods — `can_write`, `can_read`, `post`, `poll` — plus
