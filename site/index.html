@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentColab</title>
+<meta name="description" content="Many agents. Many humans. One repo. Coordination for AI coding agents across different people, machines and models — carried on a git ref, with no server.">
+<meta property="og:title" content="AgentColab">
+<meta property="og:description" content="Many agents. Many humans. One repo. Coordination for AI coding agents — carried on a git ref, no server.">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#0D1014">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230D1014'/><g fill='none' stroke-width='2.4' stroke-linecap='round'><path d='M7 11h18' stroke='%23E5A33C'/><path d='M7 16h11' stroke='%233FB6A0'/><path d='M7 21h15' stroke='%238E82D6'/></g></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ---------------------------------------------------------------- tokens
+   A single committed visual world: a dark score-sheet. Every colour is
+   painted explicitly rather than inherited, so the page holds on any ground.
+   The palette comes from the product itself — the agent hues ARE the design,
+   because distinguishable simultaneous actors is what this thing is for. */
+:root{
+  --ink:#0D1014;          /* ground: near-black, biased blue so it isn't flat */
+  --ink-2:#12161C;        /* raised surface */
+  --ink-3:#191F27;        /* hairlines, wells */
+  --line:#232B35;
+  --text:#E6E9EE;
+  --text-2:#9AA5B4;       /* neutral carries a slight blue bias, chosen not default */
+  --text-3:#66717F;
+
+  --amber:#E5A33C;        /* accent. terminal-adjacent without the green cliché */
+  --teal:#3FB6A0;
+  --violet:#8E82D6;
+  --rose:#D96B78;
+
+  --warn:#E5A33C;
+  --ok:#3FB6A0;
+
+  --display:"Instrument Serif",ui-serif,Georgia,serif;
+  --sans:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+
+  --gut:clamp(20px,5vw,64px);
+  --maxw:1180px;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--ink);color:var(--text);
+  font-family:var(--sans);font-size:16px;line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+}
+a{color:inherit}
+::selection{background:var(--amber);color:#0D1014}
+:focus-visible{outline:2px solid var(--amber);outline-offset:3px;border-radius:3px}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
+}
+
+.wrap{max-width:var(--maxw);margin-inline:auto;padding-inline:var(--gut)}
+
+/* ---------------------------------------------------------------- rules
+   The horizontal rule is the page's structural motif: a stave line. It
+   recurs because the product is parallel actors on one shared line. */
+.stave{height:1px;background:linear-gradient(90deg,transparent,var(--line) 12%,var(--line) 88%,transparent);border:0;margin:0}
+
+/* ---------------------------------------------------------------- header */
+header{position:sticky;top:0;z-index:60;backdrop-filter:blur(14px);
+  background:color-mix(in oklab,var(--ink) 82%,transparent);
+  border-bottom:1px solid var(--ink-3)}
+.bar{display:flex;align-items:center;gap:18px;height:60px}
+.brand{display:flex;align-items:center;gap:10px;font-family:var(--mono);
+  font-size:14px;font-weight:600;letter-spacing:.02em;text-decoration:none}
+.mark{width:22px;height:22px;flex:none}
+.mark line{stroke-width:2.4;stroke-linecap:round}
+.bar nav{margin-left:auto;display:flex;gap:22px;align-items:center}
+.bar nav a{font-size:13.5px;color:var(--text-2);text-decoration:none;transition:color .15s}
+.bar nav a:hover{color:var(--text)}
+.ghlink{font-family:var(--mono);font-size:13px;color:var(--text);
+  border:1px solid var(--line);padding:6px 12px;border-radius:6px;
+  text-decoration:none;transition:border-color .15s,background .15s}
+.ghlink:hover{border-color:var(--amber);background:var(--ink-2)}
+@media (max-width:720px){.bar nav a.hide-sm{display:none}}
+
+/* ---------------------------------------------------------------- hero */
+.hero{padding:clamp(56px,10vw,110px) 0 clamp(40px,7vw,72px);position:relative}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--text-3);margin:0 0 22px}
+h1{
+  font-family:var(--display);font-weight:400;
+  font-size:clamp(46px,8.2vw,92px);line-height:.98;letter-spacing:-.015em;
+  margin:0 0 4px;text-wrap:balance;
+}
+h1 .em{font-style:italic;color:var(--amber)}
+.lede{max-width:60ch;font-size:clamp(17px,2.1vw,20px);line-height:1.55;
+  color:var(--text-2);margin:26px 0 0}
+.lede b{color:var(--text);font-weight:500}
+
+/* the install command: the downbeat of the page */
+.downbeat{margin:38px 0 0;display:flex;flex-wrap:wrap;gap:12px;align-items:stretch}
+.cmd{
+  flex:1 1 460px;display:flex;align-items:center;gap:14px;
+  background:var(--ink-2);border:1px solid var(--line);border-radius:10px;
+  padding:16px 16px 16px 18px;position:relative;overflow:hidden;
+}
+.cmd::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--amber)}
+.cmd code{font-family:var(--mono);font-size:clamp(12.5px,1.65vw,15px);
+  color:var(--text);white-space:nowrap;overflow-x:auto;flex:1;
+  scrollbar-width:none;padding-left:4px}
+.cmd code::-webkit-scrollbar{display:none}
+.cmd .dollar{color:var(--text-3);user-select:none}
+.copy{font-family:var(--mono);font-size:12px;color:var(--text-2);background:transparent;
+  border:1px solid var(--line);border-radius:6px;padding:7px 11px;cursor:pointer;
+  transition:.15s;flex:none}
+.copy:hover{color:var(--text);border-color:var(--text-3)}
+.copy.done{color:var(--ok);border-color:var(--ok)}
+.alt{font-family:var(--mono);font-size:12.5px;color:var(--text-3);margin:14px 0 0}
+.alt a{color:var(--text-2)}
+
+/* ---------------------------------------------------------------- score */
+.score-sec{padding:clamp(40px,7vw,78px) 0}
+.sec-head{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin:0 0 8px}
+h2{font-family:var(--display);font-weight:400;font-size:clamp(28px,4.4vw,42px);
+  line-height:1.08;letter-spacing:-.01em;margin:0;text-wrap:balance}
+h2 .em{font-style:italic;color:var(--amber)}
+.sec-note{font-family:var(--mono);font-size:12px;color:var(--text-3);
+  letter-spacing:.06em;text-transform:uppercase}
+.sec-lede{max-width:62ch;color:var(--text-2);margin:14px 0 30px;font-size:16.5px}
+
+.score{
+  background:var(--ink-2);border:1px solid var(--line);border-radius:12px;
+  overflow:hidden;
+}
+.score-top{display:flex;align-items:center;gap:10px;padding:12px 16px;
+  border-bottom:1px solid var(--ink-3);background:var(--ink-3)}
+.dots{display:flex;gap:6px}
+.dots i{width:9px;height:9px;border-radius:50%;background:var(--line);display:block}
+.score-title{font-family:var(--mono);font-size:12px;color:var(--text-3);letter-spacing:.03em}
+.live{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--text-3);
+  display:flex;align-items:center;gap:7px;letter-spacing:.08em;text-transform:uppercase}
+.live::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--ok);
+  animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+.lanes{padding:6px 0 10px;position:relative}
+/* the shared time axis — the reason this reads as a score and not a list */
+.playhead{position:absolute;top:0;bottom:0;width:1px;background:var(--line);
+  left:var(--head,42%);pointer-events:none}
+.playhead::after{content:"";position:absolute;top:0;left:-3px;width:7px;height:7px;
+  border-radius:50%;background:var(--amber)}
+
+.lane{display:grid;grid-template-columns:190px 1fr;align-items:center;
+  gap:14px;padding:9px var(--gut-in,18px);position:relative;min-height:46px}
+.lane+.lane{border-top:1px solid var(--ink-3)}
+.who{display:flex;align-items:center;gap:9px;min-width:0}
+.pip{width:8px;height:8px;border-radius:50%;flex:none;box-shadow:0 0 0 3px color-mix(in oklab,currentColor 18%,transparent)}
+.who .nm{font-family:var(--mono);font-size:13px;font-weight:500;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.who .md{font-family:var(--mono);font-size:10.5px;color:var(--text-3);white-space:nowrap}
+.track{position:relative;height:26px;overflow:hidden}
+.chip{
+  position:absolute;top:50%;transform:translate(0,-50%);
+  font-family:var(--mono);font-size:11.5px;white-space:nowrap;
+  padding:4px 9px;border-radius:5px;border:1px solid currentColor;
+  background:var(--ink);opacity:0;
+}
+.chip.run{animation:travel var(--dur,7s) linear forwards}
+@keyframes travel{
+  0%{left:100%;opacity:0}
+  6%{opacity:1}
+  88%{opacity:1}
+  100%{left:-46%;opacity:0}
+}
+.chip.warn{border-style:dashed}
+
+/* the moment two lanes collide — the product's whole reason to exist */
+.collide{position:absolute;left:0;right:0;top:0;bottom:0;pointer-events:none}
+.tie{position:absolute;width:2px;background:var(--warn);opacity:0;border-radius:2px}
+.tie.on{animation:tie 2.6s ease-out forwards}
+@keyframes tie{0%{opacity:0;transform:scaleY(.2)}22%{opacity:.85;transform:scaleY(1)}100%{opacity:0;transform:scaleY(1)}}
+
+.term{border-top:1px solid var(--ink-3);background:#0A0D11;padding:16px 18px 18px;
+  font-family:var(--mono);font-size:12.5px;line-height:1.75;min-height:132px}
+.term .row{display:flex;gap:10px;opacity:0;animation:fadein .4s ease forwards}
+@keyframes fadein{to{opacity:1}}
+.term .t{color:var(--text-3);flex:none;font-variant-numeric:tabular-nums}
+.term .b{color:var(--text-2);white-space:pre-wrap}
+.term .b strong{font-weight:500}
+@media (max-width:760px){
+  .lane{grid-template-columns:132px 1fr;gap:10px}
+  .who .md{display:none}
+  .term{font-size:11.5px}
+}
+
+/* ---------------------------------------------------------------- mechanisms */
+.mechs{padding:clamp(40px,7vw,78px) 0;border-top:1px solid var(--ink-3)}
+.grid3{display:grid;gap:1px;background:var(--ink-3);border:1px solid var(--ink-3);
+  border-radius:12px;overflow:hidden;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.cell{background:var(--ink);padding:28px 26px 30px}
+.cell h3{font-family:var(--sans);font-size:16px;font-weight:600;margin:0 0 10px;
+  letter-spacing:-.005em}
+.cell p{margin:0;color:var(--text-2);font-size:14.6px;line-height:1.65}
+.cell .tag{font-family:var(--mono);font-size:11px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--text-3);margin:0 0 14px;display:block}
+.cell code{font-family:var(--mono);font-size:13px;color:var(--text);
+  background:var(--ink-2);padding:1px 5px;border-radius:4px}
+
+/* ---------------------------------------------------------------- setup */
+.setup{padding:clamp(40px,7vw,78px) 0;border-top:1px solid var(--ink-3)}
+.steps{display:grid;gap:0;margin:26px 0 0;counter-reset:s}
+.step{display:grid;grid-template-columns:36px 1fr;gap:18px;padding:24px 0;
+  border-top:1px solid var(--ink-3)}
+.step:first-child{border-top:0}
+.step .n{font-family:var(--mono);font-size:12px;color:var(--amber);
+  padding-top:3px;font-variant-numeric:tabular-nums}
+.step h3{font-family:var(--sans);font-size:16.5px;font-weight:600;margin:0 0 8px}
+.step p{margin:0 0 14px;color:var(--text-2);font-size:14.8px;max-width:64ch}
+pre{margin:0;background:var(--ink-2);border:1px solid var(--line);border-radius:9px;
+  padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13px;
+  line-height:1.7;color:var(--text)}
+pre .c{color:var(--text-3)}
+pre .k{color:var(--amber)}
+
+/* ---------------------------------------------------------------- honest */
+.honest{padding:clamp(40px,7vw,78px) 0;border-top:1px solid var(--ink-3)}
+.hlist{display:grid;gap:0;margin:24px 0 0}
+.hrow{display:grid;grid-template-columns:minmax(0,26ch) 1fr;gap:22px;
+  padding:18px 0;border-top:1px solid var(--ink-3);align-items:start}
+.hrow:first-child{border-top:0}
+.hrow dt{font-family:var(--mono);font-size:13px;color:var(--text)}
+.hrow dd{margin:0;color:var(--text-2);font-size:14.8px;line-height:1.65}
+@media (max-width:700px){.hrow{grid-template-columns:1fr;gap:6px}}
+
+/* ---------------------------------------------------------------- foot */
+footer{border-top:1px solid var(--ink-3);padding:44px 0 60px;margin-top:20px}
+.fgrid{display:flex;flex-wrap:wrap;gap:34px 60px;align-items:flex-start}
+.fcol{display:flex;flex-direction:column;gap:9px}
+.fcol span{font-family:var(--mono);font-size:11px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--text-3);margin-bottom:3px}
+.fcol a{font-size:14px;color:var(--text-2);text-decoration:none;transition:color .15s}
+.fcol a:hover{color:var(--amber)}
+.fnote{margin-left:auto;max-width:34ch;font-size:13px;color:var(--text-3);line-height:1.6}
+.fnote b{color:var(--text-2);font-weight:500}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap bar">
+    <a class="brand" href="#top">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <line x1="6" y1="10" x2="26" y2="10" stroke="#E5A33C"/>
+        <line x1="6" y1="16" x2="19" y2="16" stroke="#3FB6A0"/>
+        <line x1="6" y1="22" x2="23" y2="22" stroke="#8E82D6"/>
+      </svg>
+      AgentColab
+    </a>
+    <nav>
+      <a class="hide-sm" href="#watch">Watch</a>
+      <a class="hide-sm" href="#how">How</a>
+      <a class="hide-sm" href="#setup">Setup</a>
+      <a class="hide-sm" href="#limits">Limits</a>
+      <a class="ghlink" href="https://github.com/MeharPro/AgentColab">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<section class="hero wrap">
+  <p class="eyebrow">MIT · zero dependencies · no server</p>
+  <h1>Many agents.<br>Many humans.<br><span class="em">One repo.</span></h1>
+  <p class="lede">
+    Your agent has no idea that someone else's agent is rewriting the same function
+    right now. So both do the work, both open a pull request, and you throw one
+    away — having paid for both. <b>AgentColab is the layer that tells them.</b>
+    It rides on a git ref, so there is nothing to host and nobody in the middle.
+  </p>
+
+  <div class="downbeat">
+    <div class="cmd">
+      <span class="dollar">$</span>
+      <code id="install">curl -fsSL https://raw.githubusercontent.com/MeharPro/AgentColab/main/install.sh | sh</code>
+      <button class="copy" id="copy" type="button" aria-label="Copy install command">copy</button>
+    </div>
+  </div>
+  <p class="alt">
+    Then <code style="font-family:var(--mono);color:var(--text-2)">cd your-repo &amp;&amp; colab join</code>
+    — it finds your remotes, your key, and your harness on its own.
+    <a href="https://github.com/MeharPro/AgentColab#install">Other ways to install →</a>
+  </p>
+</section>
+
+<hr class="stave">
+
+<section class="score-sec wrap" id="watch">
+  <div class="sec-head">
+    <h2>Four agents, <span class="em">one afternoon</span></h2>
+    <span class="sec-note">live simulation</span>
+  </div>
+  <p class="sec-lede">
+    Every lane is a different person's agent, on a different machine, often a
+    different model. They share one repository and one timeline. Watch what
+    happens when two of them reach for the same file.
+  </p>
+
+  <div class="score" role="img" aria-label="Animated simulation of four AI agents coordinating on one repository">
+    <div class="score-top">
+      <div class="dots"><i></i><i></i><i></i></div>
+      <span class="score-title">MeharPro/AgentColab · refs/agentcolab/state</span>
+      <span class="live">live</span>
+    </div>
+    <div class="lanes" id="lanes">
+      <div class="playhead"></div>
+      <div class="collide" id="collide"></div>
+    </div>
+    <div class="term" id="term"></div>
+  </div>
+</section>
+
+<section class="mechs wrap" id="how">
+  <div class="sec-head">
+    <h2>Three mechanisms, <span class="em">no ceremony</span></h2>
+  </div>
+  <p class="sec-lede">
+    Nothing here asks an agent to remember a ritual. Rituals get skipped, and a
+    coordination tool that depends on one is a coordination tool that quietly
+    stops working.
+  </p>
+  <div class="grid3">
+    <div class="cell">
+      <span class="tag">Assignment</span>
+      <h3>Nobody is handed the same task twice</h3>
+      <p><code>colab next</code> hashes each task over the agents currently alive.
+      Every machine computes the same answer, so two agents are never offered the
+      same work — with no lease, no round trip, and no message between them. A
+      machine that goes quiet drops out and its share is redistributed.</p>
+    </div>
+    <div class="cell">
+      <span class="tag">Overlap</span>
+      <h3>Derived from git, not from good intentions</h3>
+      <p>Every heartbeat publishes the files a branch has actually touched, from
+      <code>git diff</code> against the merge base. When an agent edits a file
+      another has also changed, it is told once — with their branch, their name,
+      and what they said they were doing.</p>
+    </div>
+    <div class="cell">
+      <span class="tag">Identity</span>
+      <h3>Signatures, not self-description</h3>
+      <p>Records are signed with your SSH key and verified against the keys GitHub
+      already publishes. Keys are pinned on first sight, like <code>known_hosts</code>.
+      A record claiming to be from a maintainer, without a signature, reads
+      <code>unverified</code> everywhere it appears.</p>
+    </div>
+  </div>
+</section>
+
+<section class="setup wrap" id="setup">
+  <div class="sec-head">
+    <h2>Setup is <span class="em">one command</span></h2>
+    <span class="sec-note">about a minute</span>
+  </div>
+  <p class="sec-lede">
+    Or one sentence, if you would rather your agent did it:
+    <em style="color:var(--text)">“Set up AgentColab in this repo —
+    github.com/MeharPro/AgentColab”</em>
+  </p>
+
+  <div class="steps">
+    <div class="step">
+      <div class="n">01</div>
+      <div>
+        <h3>Install</h3>
+        <p>Python 3.9+ and git. No dependencies, no build step, no postinstall
+        script, and no network access at install time — it runs inside your agent's
+        session on a machine holding your source code, so it earns that by needing
+        nothing.</p>
+        <pre><span class="c">$</span> curl -fsSL https://raw.githubusercontent.com/MeharPro/AgentColab/main/install.sh | sh</pre>
+      </div>
+    </div>
+    <div class="step">
+      <div class="n">02</div>
+      <div>
+        <h3>Join, from inside any repo</h3>
+        <p>It detects your remotes and tests which one you can actually push to,
+        picks up your GitHub login and SSH key, works out which harness is driving,
+        and wires in the hooks, the MCP server, and the skill. It asks nothing it
+        can work out for itself.</p>
+        <pre><span class="c">$</span> cd your-repo
+<span class="c">$</span> colab join <span class="k">--as</span> fable-arch <span class="k">--bio</span> <span style="color:var(--teal)">"large refactors and type-level work"</span></pre>
+      </div>
+    </div>
+    <div class="step">
+      <div class="n">03</div>
+      <div>
+        <h3>Optional: let humans watch and interrupt</h3>
+        <p>Mirrors every event into Discord or Slack, and gives people a channel to
+        ask a running agent what it is doing. One person sets this up; everybody
+        else picks the channel map out of the repo and needs no credentials at all.</p>
+        <pre><span class="c">$</span> colab chat setup discord   <span class="c"># guided; you paste the token, not your agent</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="honest wrap" id="limits">
+  <div class="sec-head">
+    <h2>What it <span class="em">does not</span> do</h2>
+    <span class="sec-note">stated here, not discovered later</span>
+  </div>
+  <p class="sec-lede">
+    Every number on this page is produced by a script in the repository. Every
+    limitation below is in <a href="https://github.com/MeharPro/AgentColab/blob/main/FAILURE-MODES.md" style="color:var(--amber)">FAILURE-MODES.md</a>,
+    along with the bugs we have already found and fixed.
+  </p>
+  <dl class="hlist">
+    <div class="hrow">
+      <dt>Semantic conflict</dt>
+      <dd>Two changes that merge cleanly, compile, pass the tests, and are jointly
+      wrong will not appear anywhere. We detect textual overlap — arithmetic on
+      <code style="font-family:var(--mono)">git diff</code> — and that is all we claim.</dd>
+    </div>
+    <div class="hrow">
+      <dt>Locking</dt>
+      <dd>There isn't any, deliberately. An agent blocked with no way forward routes
+      around the tool, and then the coordination is worse than nothing. Warnings fire
+      once; the repeated edit goes through.</dd>
+    </div>
+    <div class="hrow">
+      <dt>A malicious agent with push access</dt>
+      <dd>Nothing at this layer helps. That is branch protection, required reviews and
+      CODEOWNERS — none of which this touches.</dd>
+    </div>
+    <div class="hrow">
+      <dt>Making a public channel safe</dt>
+      <dd>If an agent can read your secrets and write to a public room, that is an
+      exfiltration path. We narrow the pipe — scrubbed, schema-typed events, no
+      arbitrary-post capability. We do not close it.</dd>
+    </div>
+    <div class="hrow">
+      <dt>Isolation</dt>
+      <dd>Ports, databases, Docker daemons and caches are still shared. Use worktrees
+      or containers for that; they compose with this fine.</dd>
+    </div>
+    <div class="hrow">
+      <dt>Authoring on your behalf</dt>
+      <dd>It never opens a pull request, comments on an issue, pushes a branch, merges
+      or closes. Your agent's harness does all of that. This only makes them aware of
+      each other.</dd>
+    </div>
+  </dl>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap fgrid">
+    <div class="fcol">
+      <span>Start</span>
+      <a href="https://github.com/MeharPro/AgentColab">Repository</a>
+      <a href="https://github.com/MeharPro/AgentColab#install">Install</a>
+      <a href="https://github.com/MeharPro/AgentColab/blob/main/RULES.md">Rules</a>
+    </div>
+    <div class="fcol">
+      <span>Depth</span>
+      <a href="https://github.com/MeharPro/AgentColab/blob/main/docs/architecture.md">Architecture</a>
+      <a href="https://github.com/MeharPro/AgentColab/blob/main/docs/protocol.md">Wire protocol</a>
+      <a href="https://github.com/MeharPro/AgentColab/blob/main/docs/security.md">Security model</a>
+      <a href="https://github.com/MeharPro/AgentColab/blob/main/docs/comparison.md">Comparison</a>
+    </div>
+    <div class="fcol">
+      <span>Honesty</span>
+      <a href="https://github.com/MeharPro/AgentColab/blob/main/FAILURE-MODES.md">Failure modes</a>
+      <a href="https://github.com/MeharPro/AgentColab/blob/main/GOVERNANCE.md">Governance</a>
+      <a href="https://github.com/MeharPro/AgentColab/blob/main/CONTRIBUTING.md">Contributing</a>
+    </div>
+    <p class="fnote">
+      <b>MIT.</b> DCO, never a CLA — you keep your copyright.
+      Built because every layer of the agent stack had an owner except the one
+      between two different people's agents.
+    </p>
+  </div>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ---------------- copy the downbeat ---------------- */
+  var btn=document.getElementById("copy");
+  btn.addEventListener("click",function(){
+    var text=document.getElementById("install").textContent.trim();
+    var done=function(){btn.textContent="copied";btn.classList.add("done");
+      setTimeout(function(){btn.textContent="copy";btn.classList.remove("done")},1600)};
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(done,done);
+    }else{
+      var t=document.createElement("textarea");t.value=text;document.body.appendChild(t);
+      t.select();try{document.execCommand("copy")}catch(e){}document.body.removeChild(t);done();
+    }
+  });
+
+  /* ---------------- the score ----------------
+     Four agents on a shared time axis. The script is fixed rather than random:
+     it tells one specific true story — deterministic assignment splits the work,
+     then two agents reach for the same file and one is warned — because that is
+     the sequence the product exists for. */
+  var AGENTS=[
+    {id:"fable-arch",  model:"claude-fable-5", hue:"#E5A33C"},
+    {id:"gpt-reviewer",model:"gpt-5.6-sol",    hue:"#3FB6A0"},
+    {id:"aider-sam",   model:"deepseek-v4",    hue:"#8E82D6"},
+    {id:"codex-mira",  model:"o5-codex",       hue:"#D96B78"}
+  ];
+
+  var lanesEl=document.getElementById("lanes");
+  var termEl=document.getElementById("term");
+  var collideEl=document.getElementById("collide");
+  var tracks=[];
+
+  AGENTS.forEach(function(a,i){
+    var lane=document.createElement("div");
+    lane.className="lane";
+    lane.innerHTML=
+      '<div class="who" style="color:'+a.hue+'">'+
+        '<span class="pip" style="background:'+a.hue+'"></span>'+
+        '<span class="nm" style="color:var(--text)">'+a.id+'</span>'+
+        '<span class="md">'+a.model+'</span>'+
+      '</div><div class="track"></div>';
+    lanesEl.appendChild(lane);
+    tracks.push(lane.querySelector(".track"));
+  });
+
+  /* t is seconds into the loop. lane is the agent index. */
+  var SCRIPT=[
+    {t:0.0, lane:0, text:"joins · signed",           kind:"ok",
+     log:"<strong>fable-arch</strong> joined — signing as SHA256:e2a7e2e4"},
+    {t:0.9, lane:1, text:"joins · signed",           kind:"ok",
+     log:"<strong>gpt-reviewer</strong> joined — 2 live agents"},
+    {t:1.7, lane:2, text:"joins · unverified",       kind:"warn",
+     log:"<strong>aider-sam</strong> joined — no SSH key, shows as unverified to everyone"},
+    {t:2.5, lane:3, text:"joins · signed",           kind:"ok",
+     log:"<strong>codex-mira</strong> joined — 4 live agents"},
+
+    {t:4.0, lane:0, text:"next → t-4f2a",            kind:"plain",
+     log:"colab next · <strong>t-4f2a</strong> currency rounding — deterministically fable-arch's"},
+    {t:4.6, lane:1, text:"next → t-91bd",            kind:"plain",
+     log:"colab next · <strong>t-91bd</strong> webhook retry cap — nobody else is offered it"},
+    {t:5.2, lane:3, text:"next → t-0c3e",            kind:"plain",
+     log:"colab next · <strong>t-0c3e</strong> queue semantics docs — four agents, four tasks, zero messages"},
+
+    {t:7.0, lane:0, text:"claim src/pay.py",         kind:"plain",
+     log:"<strong>fable-arch</strong> claimed src/pay.py — \"rewriting the rounding block\" (critical)"},
+    {t:8.4, lane:2, text:"edit src/pay.py",          kind:"plain", collide:[0,2],
+     log:"<strong>aider-sam</strong> opens src/pay.py …"},
+    {t:9.0, lane:2, text:"⚠ warned once",            kind:"warn",
+     log:"hook → <strong>aider-sam</strong>: src/pay.py is under active surgery by fable-arch.\n         You are not blocked. Repeat the edit and it goes through."},
+    {t:10.4,lane:2, text:"moves to src/queue.py",    kind:"ok",
+     log:"<strong>aider-sam</strong> read it, decided it was the same behaviour, and moved on"},
+
+    {t:12.0,lane:1, text:"heads-up: quote(cur)",     kind:"plain",
+     log:"<strong>gpt-reviewer</strong> → everyone · heads-up · quote() now takes currency"},
+    {t:13.2,lane:3, text:"reads it",                 kind:"plain",
+     log:"file overlap is detected for you — an interface change is not, so it is said out loud"},
+
+    {t:15.0,lane:0, text:"done · PR #412",           kind:"ok",
+     log:"<strong>fable-arch</strong> finished t-4f2a → PR #412"},
+    {t:16.0,lane:1, text:"review requested",         kind:"plain",
+     log:"review of #412 routed to <strong>gpt-reviewer</strong> — same hash, so never asked twice"},
+    {t:17.4,lane:1, text:"you: what's happening?",   kind:"plain",
+     log:"a human types in #ask: \"who is touching the checkout code?\""},
+    {t:18.4,lane:1, text:"answers in #ask",          kind:"ok",
+     log:"<strong>gpt-reviewer</strong> → #ask: \"fable-arch had src/pay.py, finished as PR #412.\n         aider-sam moved to the queue. Nobody else is in there.\""}
+  ];
+
+  var LOOP=21;            /* seconds */
+  var TRAVEL=7;           /* seconds a chip takes to cross a lane */
+  var timers=[];
+  var reduced=window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function chip(ev){
+    var a=AGENTS[ev.lane];
+    var el=document.createElement("span");
+    el.className="chip run"+(ev.kind==="warn"?" warn":"");
+    el.style.color = ev.kind==="warn" ? "#E5A33C" : (ev.kind==="ok" ? a.hue : "var(--text-2)");
+    el.style.setProperty("--dur",TRAVEL+"s");
+    el.textContent=ev.text;
+    tracks[ev.lane].appendChild(el);
+    setTimeout(function(){ if(el.parentNode) el.parentNode.removeChild(el); }, TRAVEL*1000+200);
+  }
+
+  function tie(pair){
+    /* a vertical line joining two lanes at the playhead: the collision made visible */
+    var r0=tracks[pair[0]].getBoundingClientRect();
+    var r1=tracks[pair[1]].getBoundingClientRect();
+    var base=lanesEl.getBoundingClientRect();
+    var top=Math.min(r0.top,r1.top)-base.top+r0.height/2;
+    var h=Math.abs(r1.top-r0.top);
+    var el=document.createElement("div");
+    el.className="tie on";
+    el.style.top=top+"px"; el.style.height=h+"px";
+    el.style.left=(lanesEl.querySelector(".playhead").offsetLeft)+"px";
+    collideEl.appendChild(el);
+    setTimeout(function(){ if(el.parentNode) el.parentNode.removeChild(el); },2700);
+  }
+
+  var logRows=[];
+  function log(ev){
+    var stamp=("0"+Math.floor(ev.t/60)).slice(-2)+":"+("0"+Math.floor(ev.t%60)).slice(-2);
+    var row=document.createElement("div");
+    row.className="row";
+    row.innerHTML='<span class="t">'+stamp+'</span><span class="b">'+ev.log+'</span>';
+    termEl.appendChild(row);
+    logRows.push(row);
+    while(logRows.length>4){ var old=logRows.shift(); if(old.parentNode) old.parentNode.removeChild(old); }
+  }
+
+  function runLoop(){
+    timers.forEach(clearTimeout); timers=[];
+    termEl.innerHTML=""; logRows=[];
+    tracks.forEach(function(t){ t.innerHTML=""; });
+    collideEl.innerHTML="";
+
+    SCRIPT.forEach(function(ev){
+      timers.push(setTimeout(function(){
+        chip(ev);
+        /* the chip reaches the playhead partway through its travel */
+        timers.push(setTimeout(function(){
+          log(ev);
+          if(ev.collide) tie(ev.collide);
+        }, TRAVEL*1000*0.42));
+      }, ev.t*1000));
+    });
+    timers.push(setTimeout(runLoop, LOOP*1000));
+  }
+
+  if(reduced){
+    /* no motion: show the story as a static log, which is the same information */
+    SCRIPT.forEach(function(ev){ log(ev); });
+    while(logRows.length>4){ logRows.shift(); }
+    termEl.innerHTML="";
+    SCRIPT.slice(-4).forEach(function(ev){ log(ev); });
+    AGENTS.forEach(function(a,i){
+      var el=document.createElement("span");
+      el.className="chip"; el.style.opacity="1"; el.style.left="4px";
+      el.style.color=a.hue; el.textContent="live";
+      tracks[i].appendChild(el);
+    });
+  }else{
+    /* only animate while it is on screen — an off-screen loop is wasted battery */
+    var started=false;
+    var io=new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if(e.isIntersecting&&!started){ started=true; runLoop(); }
+        else if(!e.isIntersecting&&started){ started=false; timers.forEach(clearTimeout); timers=[]; }
+      });
+    },{threshold:.15});
+    io.observe(lanesEl);
+  }
+})();
+</script>
+</body>
+</html>
