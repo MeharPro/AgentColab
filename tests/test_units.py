@@ -6,7 +6,10 @@ and no git. The parts that need a repository live in test_e2e.sh.
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -302,6 +305,81 @@ class ContentIds(unittest.TestCase):
 
     def test_different_lessons_do_not_collide(self):
         self.assertNotEqual(records.content_id("f", "a"), records.content_id("f", "b"))
+
+
+class WindowsLockPath(unittest.TestCase):
+    """The no-fcntl branch, which no CI runner exercises.
+
+    `fcntl` is POSIX-only, so on Windows `store.fcntl` is None and locking falls
+    back to a lockfile. Nothing in CI runs on Windows, so without this the entire
+    branch is untested — and a coordination tool that deadlocks on someone's
+    machine the first time two sessions overlap is a coordination tool they
+    uninstall.
+    """
+
+    def _no_fcntl_store(self, repo):
+        import importlib
+        import importlib.abc
+
+        class NoFcntl(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path=None, target=None):
+                if name == "fcntl":
+                    raise ImportError("simulated: no fcntl on this platform")
+                return None
+
+        # subprocess imports fcntl on POSIX, so it is already cached; evicting it
+        # is what makes the simulation real rather than decorative.
+        saved_fcntl = sys.modules.pop("fcntl", None)
+        saved_store = sys.modules.pop("agentcolab.store", None)
+        finder = NoFcntl()
+        sys.meta_path.insert(0, finder)
+        try:
+            module = importlib.import_module("agentcolab.store")
+            self.assertIsNone(module.fcntl, "simulation did not take effect")
+            return module, module.Store(root=repo)
+        finally:
+            sys.meta_path.remove(finder)
+            if saved_fcntl is not None:
+                sys.modules["fcntl"] = saved_fcntl
+            if saved_store is not None:
+                sys.modules["agentcolab.store"] = saved_store
+
+    def _repo(self):
+        import subprocess
+        import tempfile
+        work = tempfile.mkdtemp(prefix="agentcolab-nofcntl-")
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        os.environ["AGENTCOLAB_HOME"] = os.path.join(work, "home")
+        self.addCleanup(os.environ.pop, "AGENTCOLAB_HOME", None)
+        repo = os.path.join(work, "repo")
+        os.makedirs(repo)
+        for cmd in (["git", "init", "-q", "-b", "main"],
+                    ["git", "-c", "user.email=a@b", "-c", "user.name=a",
+                     "commit", "-q", "--allow-empty", "-m", "init"]):
+            subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+        return repo
+
+    def test_locking_works_without_fcntl(self):
+        repo = self._repo()
+        _, store = self._no_fcntl_store(repo)
+        with store.lock():
+            self.assertTrue((store.shared / "lock").exists())
+        self.assertFalse((store.shared / "lock").exists())
+        with store.lock():          # must not deadlock on re-acquire
+            pass
+
+    def test_a_lock_left_by_a_crashed_process_does_not_wedge_the_next_run(self):
+        repo = self._repo()
+        _, store = self._no_fcntl_store(repo)
+        store.shared.mkdir(parents=True, exist_ok=True)
+        stale = store.shared / "lock"
+        stale.write_text("99999")
+        os.utime(stale, (0, 0))     # ancient mtime: the holder is long gone
+        start = time.time()
+        with store.lock():
+            pass
+        self.assertLess(time.time() - start, 5,
+                        "a stale lockfile blocked for the full timeout")
 
 
 if __name__ == "__main__":
