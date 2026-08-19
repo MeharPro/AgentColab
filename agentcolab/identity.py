@@ -279,7 +279,8 @@ def _fetch(url: str, timeout: int = 10) -> str | None:
         return None
 
 
-def github_keys(login: str, cache_dir: Path, timeout: int = 10) -> list[str]:
+def github_keys(login: str, cache_dir: Path, timeout: int = 10,
+                *, allow_fetch: bool = True) -> list[str]:
     """Public SSH keys GitHub publishes for an account, cached on disk.
 
     This is the entire sybil story: a signature verifies against a key that
@@ -294,6 +295,8 @@ def github_keys(login: str, cache_dir: Path, timeout: int = 10) -> list[str]:
     stamp = parse_iso(blob.get("fetched_at"))
     if stamp and (now() - stamp).total_seconds() < KEYS_TTL_SECONDS:
         return list(blob.get("keys") or [])
+    if not allow_fetch:
+        return list(blob.get("keys") or [])   # stale beats blank
 
     text = _fetch(f"https://github.com/{login}.keys", timeout=timeout)
     if text is None:
@@ -378,8 +381,12 @@ def build_allowed(roster: dict[str, Any], cache_dir: Path, *,
         if not principal:
             continue
         keys = [normalise_pubkey(k) for k in (entry.get("keys") or [])]
-        if entry.get("github") and online:
-            keys += github_keys(str(entry["github"]), cache_dir)
+        if entry.get("github"):
+            # Offline means "do no network I/O", not "forget what we already
+            # know". Skipping the cache too made every read-path classification
+            # ignore GitHub-published keys, so properly rostered members showed
+            # as unverified on every surface that reads without syncing.
+            keys += github_keys(str(entry["github"]), cache_dir, allow_fetch=online)
         merged = allowed.setdefault(principal, [])
         for key in keys:
             if key and key not in merged:

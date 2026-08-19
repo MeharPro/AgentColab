@@ -42,12 +42,17 @@ MUTATING_BASH = re.compile(
     r"(?:^|[|;&\n(]\s*)(?:rm|mv|cp|truncate|tee|patch|dd)\s|"
     r"\bsed\s+(?:-[a-z]*i|--in-place)|"
     r"\bperl\s+-[a-z]*i|"
-    r"\bgit\s+(?:checkout|restore|reset|clean|apply|revert|stash)\b|"
-    # A redirect only counts when it targets a path. '2>&1' and '>&2' are not
-    # file mutations, and treating them as such produced false accusations.
-    r">>?\s*(?![&\s])(?!/dev/)[^\s;|&]+",
+    r"\bgit\s+(?:checkout|restore|reset|clean|apply|revert|stash)\b",
     re.I | re.MULTILINE,
 )
+
+# A redirect writes exactly one file: its target. '2>&1' and '>&2' are not file
+# mutations at all. Kept separate from MUTATING_BASH because lumping them
+# together meant `grep TODO src/core.py > /tmp/out` counted as *rewriting*
+# src/core.py, and the peer got a "someone edited into your claim" accusation
+# for reading their file. A false accusation costs more than a missed one here:
+# it teaches people to ignore the notices.
+REDIRECT_TARGET = re.compile(r">>?\s*(?![&\s])(?!/dev/)([^\s;|&]+)")
 
 
 # ---------------------------------------------------------------- plumbing
@@ -211,8 +216,25 @@ def _tool_paths(store: Store, payload: dict[str, Any]) -> list[str]:
 def _bash_paths(store: Store, payload: dict[str, Any], watched: set[str],
                 patterns: list[str]) -> list[str]:
     command = (payload.get("tool_input") or {}).get("command")
-    if not isinstance(command, str) or not MUTATING_BASH.search(command):
+    if not isinstance(command, str):
         return []
+    redirects = REDIRECT_TARGET.findall(command)
+    if not MUTATING_BASH.search(command):
+        # No in-place mutation anywhere. Whatever this command reads is its own
+        # business; only the file a redirect writes to is a write.
+        if not redirects:
+            return []
+        try:
+            targets = shlex.split(" ".join(redirects))
+        except ValueError:
+            targets = redirects
+        hits = []
+        for token in targets:
+            candidate = records.normalise_path(token.strip("'\""), store.repo_root)
+            if candidate and (candidate in watched
+                              or records.path_matches(candidate, patterns)):
+                hits.append(candidate)
+        return hits
     try:
         tokens = shlex.split(command)
     except ValueError:

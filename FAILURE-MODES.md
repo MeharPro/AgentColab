@@ -171,6 +171,21 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **Reading a claimed file could get you accused of editing it.** Any `>`
+  redirect counted as an in-place mutation, so `grep TODO src/core.py >
+  /tmp/out` implicated `src/core.py` and sent its owner a "someone edited into
+  your claim" notice. A false accusation costs more than a missed one — it
+  teaches people to ignore the notices — so a redirect now implicates only its
+  own target.
+- **A peer-controlled id could forge a record in the wire digest.** `digest()`
+  is what an agent reads as the authoritative message list, and a newline in an
+  id added an entire fabricated line to it, attributed to whoever the forger
+  chose. One message is now always one line.
+- **Offline meant amnesia, not just silence.** The read path builds its key
+  table with `online=False`, which skipped GitHub keys *including the cached
+  ones*, so properly rostered members classified as unverified on every surface
+  that reads without syncing. Offline now means "make no network request" and
+  still uses what is already known.
 - **A delivered Slack message was reported as undelivered.** An incoming
   webhook answers with the bare string `ok`, `http()` fed that to `json.loads`,
   and the resulting `ValueError` was caught by the caller as a transport

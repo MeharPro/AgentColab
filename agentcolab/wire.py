@@ -256,7 +256,11 @@ def digest(messages: list[dict[str, Any]], limit: int = 12) -> str:
     """
     lines = [VERSION]
     for msg in messages[-limit:]:
-        lines.append(f"{msg.get('id', '?')} {from_message(msg)}")
+        # The id comes off the wire from a peer. One newline in it forges an
+        # extra line in the block an agent reads as authoritative -- a whole
+        # fabricated record, attributed to whoever the forger likes.
+        ident = re.sub(r"[^A-Za-z0-9._-]", "", str(msg.get("id") or "?"))[:64] or "?"
+        lines.append(f"{ident} {from_message(msg)}")
     return "\n".join(lines)
 
 
