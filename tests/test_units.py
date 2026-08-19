@@ -344,6 +344,34 @@ class Attribution(unittest.TestCase):
         self.assertEqual(got["agent"], "victoria")
 
 
+class UnknownDependencies(unittest.TestCase):
+    def test_a_dependency_naming_no_task_is_reported(self):
+        # It still blocks -- the peer that owns it may simply not have synced --
+        # but a task removed from the pool forever with nothing said is worse.
+        board_state = {"t-1": {"id": "t-1", "state": "open", "deps": ["t-nope"]},
+                       "t-2": {"id": "t-2", "state": "open", "deps": []}}
+
+        class _Store:
+            pass
+        real = board.tasks
+        board.tasks = lambda store: board_state
+        try:
+            stuck = board.blocked_by_unknown(_Store())
+        finally:
+            board.tasks = real
+        self.assertEqual(stuck, [("t-1", ["t-nope"])])
+
+    def test_a_satisfied_dependency_reports_nothing(self):
+        board_state = {"t-1": {"id": "t-1", "state": "open", "deps": ["t-2"]},
+                       "t-2": {"id": "t-2", "state": "done", "deps": []}}
+        real = board.tasks
+        board.tasks = lambda store: board_state
+        try:
+            self.assertEqual(board.blocked_by_unknown(object()), [])
+        finally:
+            board.tasks = real
+
+
 class TrustMinimum(unittest.TestCase):
     """A documented control that does nothing is worse than no control."""
 

@@ -464,6 +464,17 @@ def cmd_next(store: Store, args: argparse.Namespace) -> int:
     return 0
 
 
+def _report_unknown_deps(store: Store) -> None:
+    """A task nothing can ever offer should not be invisible as well."""
+    stuck = board.blocked_by_unknown(store)
+    if not stuck:
+        return
+    eprint(f"colab: {len(stuck)} task(s) blocked by dependencies no known task defines.")
+    for task_id, unknown in stuck[:5]:
+        eprint(f"     {task_id} waits on {', '.join(unknown)}")
+    eprint("     Either the peer that owns them has not synced, or the id is a typo.")
+
+
 def cmd_board(store: Store, args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(list(board.tasks(store).values()), indent=2, sort_keys=True))
@@ -477,6 +488,7 @@ def cmd_board(store: Store, args: argparse.Namespace) -> int:
         for task in fights:
             print(f"  {task.get('id')} -> {task.get('owner')} "
                   f"(stood down: {', '.join(task.get('contested') or [])})")
+    _report_unknown_deps(store)
     return 0
 
 

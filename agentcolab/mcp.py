@@ -223,7 +223,7 @@ def call(store: Store, name: str, arguments: dict[str, Any]) -> str:
             allow_secrets=False))
     if name == "colab_inbox":
         return _capture(cli.cmd_inbox, store, _ns(
-            chat=bool(get("chat")), wire=True, limit=15))
+            all=False, chat=bool(get("chat")), wire=True, limit=15))
     if name == "colab_read":
         return _capture(cli.cmd_read, store, _ns(id=_arg(get("id"))))
     if name == "colab_answer":

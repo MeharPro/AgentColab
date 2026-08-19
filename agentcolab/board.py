@@ -165,6 +165,25 @@ def tasks(store: Store) -> dict[str, dict[str, Any]]:
     return board
 
 
+def blocked_by_unknown(store: Store) -> list[tuple[str, list[str]]]:
+    """(task id, dependency ids nothing defines).
+
+    Reported rather than silently tolerated: a task whose dependency names no
+    known task is invisible in `colab next` forever, and the two causes -- a
+    typo, or a peer whose records have not synced yet -- want opposite responses
+    from a human. Saying nothing serves neither.
+    """
+    board = tasks(store)
+    out = []
+    for task in board.values():
+        if task.get("state") != "open":
+            continue
+        unknown = [dep for dep in task.get("deps") or [] if dep not in board]
+        if unknown:
+            out.append((str(task.get("id")), unknown))
+    return out
+
+
 def ready_order(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The one canonical ordering of workable tasks.
 
@@ -207,8 +226,16 @@ def open_tasks(store: Store) -> list[dict[str, Any]]:
             continue
         # A task whose dependency is unfinished is not workable yet, and
         # offering it produces an agent that gets stuck and asks a human.
-        if any(board.get(dep, {}).get("state") not in ("done",)
-               for dep in task.get("deps") or []):
+        blocked = [dep for dep in task.get("deps") or []
+                   if board.get(dep, {}).get("state") != "done"]
+        if blocked:
+            # A dependency naming no known task still blocks -- it may simply be
+            # unsynced, and unblocking on that guess would run work whose
+            # prerequisite is genuinely unfinished. But it is recorded, because
+            # a task removed from the pool forever by a typo with nothing said
+            # is the worst of both.
+            task["_blocked_by"] = blocked
+            task["_blocked_unknown"] = [d for d in blocked if d not in board]
             continue
         ready.append(task)
     return ready_order(ready)

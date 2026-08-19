@@ -21,7 +21,8 @@ import urllib.error
 from typing import Any
 
 from .. import records
-from .base import CHANNELS, Adapter, ChatError, Event, http, normalise_incoming, resolve
+from .base import (CHANNELS, Adapter, ChatError, Event, http, inputs,
+                   normalise_incoming, resolve)
 
 API = "https://discord.com/api/v10"
 
@@ -50,7 +51,11 @@ class Discord(Adapter):
         if explicit:
             return [str(x) for x in explicit if x]
         out = []
-        for name in ("ask",):
+        # Every channel declared as an input, not just the built-in `ask`. A
+        # project could define its own `dir: "in"` channel, watch provision
+        # create it, and then never receive a word from it -- declared,
+        # provisioned, and silently never polled.
+        for name in inputs(self.config):
             entry = table.get(name) or {}
             if entry.get("id"):
                 out.append(str(entry["id"]))

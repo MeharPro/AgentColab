@@ -428,6 +428,36 @@ class EventContract(unittest.TestCase):
                          "a call site passes an argument its callee does not accept")
 
 
+class CustomInputChannels(unittest.TestCase):
+    """A custom `dir: "in"` channel must actually be read.
+
+    It was declared, provisioned, and then never polled: _read_ids hardcoded
+    ("ask",). A feature that creates the room and ignores everything said in it
+    is worse than one that was never built.
+    """
+
+    CONF = {"token": "t",
+            "custom": {"bs-chat": {"purpose": "blunt", "dir": "in"},
+                       "notes": {"purpose": "write-only"}},
+            "channels": {"ask": {"id": "200"}, "bs-chat": {"id": "300"},
+                         "notes": {"id": "400"}, "link": {"id": "100"}}}
+
+    def test_both_adapters_poll_a_custom_input_channel(self):
+        for cls in (discord.Discord, slack.Slack):
+            ids = cls(self.CONF)._read_ids()
+            self.assertIn("300", ids, f"{cls.__name__} ignores its custom input channel")
+            self.assertIn("200", ids, f"{cls.__name__} stopped reading #ask")
+
+    def test_an_output_only_custom_channel_is_not_polled(self):
+        for cls in (discord.Discord, slack.Slack):
+            self.assertNotIn("400", cls(self.CONF)._read_ids())
+
+    def test_resolve_accepts_a_platform_slice_as_well_as_the_whole_config(self):
+        # Adapters hold the slice; requiring the outer shape was the actual bug.
+        self.assertIn("bs-chat", base.inputs({"custom": {"bs-chat": {"dir": "in"}}}))
+        self.assertIn("bs-chat", base.inputs({"chat": {"custom": {"bs-chat": {"dir": "in"}}}}))
+
+
 class MCPTransportSafety(unittest.TestCase):
     """A tool argument must never be able to consume the JSON-RPC transport.
 

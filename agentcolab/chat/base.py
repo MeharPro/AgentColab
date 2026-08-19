@@ -66,7 +66,12 @@ def resolve(config: dict[str, Any] | None = None) -> dict[str, dict[str, str]]:
     arriving from chat is the lowest-trust input in the system.
     """
     out: dict[str, dict[str, str]] = {k: dict(v) for k, v in BUILTIN.items()}
-    custom = ((config or {}).get("chat") or {}).get("custom") or {}
+    # Accepts the whole config or one platform's slice of it. Adapters hold the
+    # slice, and requiring the outer shape meant an adapter asking which
+    # channels are inputs silently got only the built-in ones — so a custom
+    # input channel was provisioned and then never polled.
+    source = config or {}
+    custom = (source.get("chat") or {}).get("custom") or source.get("custom") or {}
     for name, spec in custom.items():
         if not isinstance(spec, dict):
             continue

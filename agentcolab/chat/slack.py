@@ -20,7 +20,8 @@ import urllib.error
 from typing import Any
 
 from .. import records
-from .base import CHANNELS, Adapter, ChatError, Event, http, normalise_incoming, resolve
+from .base import (CHANNELS, Adapter, ChatError, Event, http, inputs,
+                   normalise_incoming, resolve)
 
 API = "https://slack.com/api"
 
@@ -42,7 +43,9 @@ class Slack(Adapter):
         explicit = self.config.get("read_channels")
         if explicit:
             return [str(x) for x in explicit if x]
-        return [str((table.get(name) or {}).get("id")) for name in ("ask",)
+        # Every declared input channel, not just the built-in `ask`: a custom
+        # `dir: "in"` channel used to be provisioned and then never polled.
+        return [str((table.get(name) or {}).get("id")) for name in inputs(self.config)
                 if (table.get(name) or {}).get("id")]
 
     # -- outbound ---------------------------------------------------------

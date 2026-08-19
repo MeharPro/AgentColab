@@ -171,6 +171,22 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **A custom input channel was created and then never read.** `_read_ids`
+  hardcoded `("ask",)`, so a project could declare a `dir: "in"` channel, watch
+  `chat provision` create it, and never receive a word from it. The underlying
+  cause was `resolve()` accepting only the outer config shape while adapters
+  hold a per-platform slice — so an adapter asking "which channels are inputs"
+  silently got the built-ins. A feature that creates the room and ignores
+  everything said in it is worse than one that was never built.
+- **A briefing that failed to build was never retried.** The session was marked
+  briefed *before* the briefing was produced, so if building it failed the agent
+  silently started work knowing nothing, permanently. It is recorded only once
+  the briefing has actually been emitted.
+- **A dependency naming no known task removed it from the pool forever.** It
+  still blocks — the peer that owns it may simply not have synced, and guessing
+  otherwise would run work whose prerequisite is genuinely unfinished — but
+  `colab board` now says which tasks are waiting on ids nothing defines, since a
+  typo and an unsynced peer want opposite responses from a human.
 - **`trust.minimum` was documented, printed, and never enforced.**
   `docs/security.md` said "a project can require a minimum trust level";
   `require_trust()` read the setting; nothing acted on it. A security control

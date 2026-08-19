@@ -328,11 +328,16 @@ def userpromptsubmit(payload: dict[str, Any]) -> int:
     briefed = dict(local.get("briefed") or {})
     if briefed.get(sess) == signature:
         return 0
-    briefed[sess] = signature
-    local["briefed"] = dict(list(briefed.items())[-8:])
-    store.save_local(local)
     if signature == "empty":
+        # Nothing to say. Record that, so we do not recompute it every prompt.
+        briefed[sess] = signature
+        local["briefed"] = dict(list(briefed.items())[-8:])
+        store.save_local(local)
         return 0
+    # Deliberately NOT marked as briefed here. _brief() records it only once the
+    # briefing has actually been produced and emitted -- marking first meant a
+    # briefing that failed to build was never retried, and the agent silently
+    # started work knowing nothing.
     return _brief(store, "UserPromptSubmit", sess)
 
 
