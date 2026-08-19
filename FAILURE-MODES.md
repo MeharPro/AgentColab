@@ -171,6 +171,24 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **A delivered Slack message was reported as undelivered.** An incoming
+  webhook answers with the bare string `ok`, `http()` fed that to `json.loads`,
+  and the resulting `ValueError` was caught by the caller as a transport
+  failure. Every successful webhook post counted as a failure.
+- **A network blip revoked an identity for six hours.** `_fetch` returned `""`
+  both for "this account publishes no keys" and for "the request failed", so a
+  failed fetch cached an empty key set with a fresh timestamp — and on a machine
+  with no prior cache that silently unverified the account until the TTL
+  expired. The two cases are now distinguishable, and a failure is never
+  cached.
+- **Notices queued during a publish were destroyed unsent.** `_flush_notices`
+  snapshotted the queue, published (seconds of network I/O), then cleared the
+  *whole* list — so anything the edit hook queued in that window vanished. Only
+  what was actually sent is removed now.
+- **Two sources with long similar names shared one ref.** The slug was truncated
+  to 24 characters for readability, so two forks could overwrite each other's
+  state — quietly merging a low-trust fork's records into a trusted one's. The
+  ref now carries a suffix derived from the full name.
 - **A fork could inject records you then republished as your own.** `view()`
   applied each source's `scope`; `adopt_own()` — which writes straight into
   `mine/` during a rejoin — did not. A fork scoped to `mallory` could publish

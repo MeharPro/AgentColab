@@ -121,7 +121,16 @@ def http(url: str, *, data: bytes | None = None, headers: dict[str, str] | None 
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         raw = response.read()
-    return json.loads(raw) if raw else None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        # Not every successful endpoint answers in JSON. A Slack incoming
+        # webhook replies with the bare string "ok", which used to raise here
+        # and be caught as a transport failure by the caller -- so a delivered
+        # message was reported as undelivered, every time.
+        return raw.decode(errors="replace").strip()
 
 
 class Event:

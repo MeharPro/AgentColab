@@ -86,6 +86,8 @@ class Slack(Adapter):
             # An incoming webhook answers with the bare string "ok".
             if result is None or result is True:
                 return True
+            if isinstance(result, str):
+                return result.strip().lower() == "ok"
             if isinstance(result, dict):
                 if result.get("ok"):
                     return True

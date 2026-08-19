@@ -28,6 +28,7 @@ owner controls, so a fork cannot impersonate the maintainer.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import random
@@ -443,7 +444,15 @@ class Store:
         self.cache.mkdir(parents=True, exist_ok=True)
 
     def _source_ref(self, name: str) -> str:
-        return f"refs/agentcolab/sources/{records.slug(name, limit=24)}"
+        """One ref per source, and never the same ref for two of them.
+
+        The slug is truncated for readability, so two differently-named sources
+        sharing a long prefix used to land on one ref and overwrite each other's
+        state -- quietly merging a low-trust fork's records into a trusted one's.
+        The suffix is derived from the full name, so it stays stable and unique.
+        """
+        tag = hashlib.sha256(name.encode()).hexdigest()[:8]
+        return f"refs/agentcolab/sources/{records.slug(name, limit=24)}-{tag}"
 
     def fetch(self, timeout: int = 25) -> dict[str, bool]:
         """Pull every source's state ref. A failure is offline, never fatal."""

@@ -264,13 +264,19 @@ def verify(payload: dict[str, Any], allowed: dict[str, list[str]]) -> tuple[bool
 KEYS_TTL_SECONDS = 6 * 3600
 
 
-def _fetch(url: str, timeout: int = 10) -> str:
+def _fetch(url: str, timeout: int = 10) -> str | None:
+    """The body, or None if the request failed.
+
+    The distinction matters: "" is a real answer meaning the account publishes
+    no keys, while None means we did not get to ask. Collapsing both into ""
+    made a network blip look identical to a revocation.
+    """
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read().decode(errors="ignore")
     except (urllib.error.URLError, OSError, ValueError):
-        return ""
+        return None
 
 
 def github_keys(login: str, cache_dir: Path, timeout: int = 10) -> list[str]:
@@ -290,10 +296,16 @@ def github_keys(login: str, cache_dir: Path, timeout: int = 10) -> list[str]:
         return list(blob.get("keys") or [])
 
     text = _fetch(f"https://github.com/{login}.keys", timeout=timeout)
+    if text is None:
+        # The fetch failed, which says nothing about the account. Serve whatever
+        # we have and do NOT stamp the cache: writing an empty set here made one
+        # unlucky moment suppress that account's keys for the whole TTL, and on a
+        # machine with no prior cache that silently unverifies them entirely.
+        return list(blob.get("keys") or [])
     keys = [normalise_pubkey(line) for line in text.splitlines()]
     keys = [k for k in keys if k]
     if not keys and blob.get("keys"):
-        return list(blob["keys"])   # a network blip must not revoke anyone
+        return list(blob["keys"])   # a blank answer must not revoke anyone
     cache.parent.mkdir(parents=True, exist_ok=True)
     _write_json(cache, {"login": login, "keys": keys, "fetched_at": iso()})
     return keys

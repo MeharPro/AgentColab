@@ -6,9 +6,11 @@ and no git. The parts that need a repository live in test_e2e.sh.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -328,6 +330,52 @@ class Attribution(unittest.TestCase):
         got = self._attribute({"agent": "victim", "id": "t-1"},
                               "tasks/victoria/t-1.json")
         self.assertEqual(got["agent"], "victoria")
+
+
+class SourceRefs(unittest.TestCase):
+    def test_two_long_names_do_not_share_a_ref(self):
+        from agentcolab.store import Store
+        a = Store._source_ref(None, "mallory-fork-of-the-main-project-alpha")
+        b = Store._source_ref(None, "mallory-fork-of-the-main-project-beta")
+        self.assertNotEqual(a, b, "two sources overwrite each other's state")
+
+    def test_a_ref_is_stable_for_the_same_name(self):
+        from agentcolab.store import Store
+        name = "some-source"
+        self.assertEqual(Store._source_ref(None, name), Store._source_ref(None, name))
+
+
+class KeyCache(unittest.TestCase):
+    """An outage is not a revocation."""
+
+    def setUp(self):
+        self.cache = Path(tempfile.mkdtemp(prefix="agentcolab-keys-"))
+        self.addCleanup(shutil.rmtree, str(self.cache), ignore_errors=True)
+        self._real = identity._fetch
+        self.addCleanup(setattr, identity, "_fetch", self._real)
+
+    def test_a_failed_fetch_does_not_get_cached(self):
+        identity._fetch = lambda url, timeout=10: None
+        self.assertEqual(identity.github_keys("someone", self.cache), [])
+        self.assertFalse((self.cache / "keys" / "someone.json").exists(),
+                         "an outage was written to cache, suppressing the account")
+
+    def test_a_failed_fetch_serves_the_previous_answer(self):
+        identity._fetch = lambda url, timeout=10: (
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexamplekeyhere user@host")
+        self.assertEqual(len(identity.github_keys("someone", self.cache)), 1)
+        blob = json.loads((self.cache / "keys" / "someone.json").read_text())
+        blob["fetched_at"] = "2020-01-01T00:00:00Z"
+        (self.cache / "keys" / "someone.json").write_text(json.dumps(blob))
+        identity._fetch = lambda url, timeout=10: None
+        self.assertEqual(len(identity.github_keys("someone", self.cache)), 1,
+                         "a stale cache plus an outage revoked a real account")
+
+    def test_a_genuinely_empty_answer_is_still_honoured(self):
+        identity._fetch = lambda url, timeout=10: ""
+        self.assertEqual(identity.github_keys("nokeys", self.cache), [])
+        self.assertTrue((self.cache / "keys" / "nokeys.json").exists(),
+                        "a real empty answer should be cached like any other")
 
 
 class ForkScope(unittest.TestCase):

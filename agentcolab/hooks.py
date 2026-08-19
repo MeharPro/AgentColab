@@ -353,7 +353,12 @@ def _flush_notices(store: Store) -> int:
         }
         session.sign_and_put(store, f"msgs/{store.agent}/{message['id']}.json", message)
     store.publish("override notices")
-    store.update_local(notices=[])
+    # Remove exactly what was sent, not everything. store.publish does network
+    # I/O and takes seconds; an edit hook firing in that window queues a notice
+    # that clearing the whole list would destroy unsent -- and the point of a
+    # notice is that the other agent finds out.
+    still_queued = [n for n in (store.local().get("notices") or []) if n not in pending]
+    store.update_local(notices=still_queued)
     return len(pending)
 
 
