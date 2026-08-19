@@ -171,6 +171,15 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **`colab relay` crashed on every run that had anything to relay.** It passed
+  `wire_line=` where `Event` takes `wire=`, so it raised `TypeError` the moment a
+  single record was in range — and that is the one path holding the bot token,
+  the whole reason contributors need no chat credentials. The scheduled workflow
+  was green throughout, because without the secret configured it exits before
+  reaching the call. That is the "flagship feature must work in automation" trap,
+  and knowing about it did not stop me walking into it. A structural test now
+  checks every `Event(...)` call site against the signature, so a typo'd keyword
+  fails in the suite rather than in somebody's CI.
 - **A publish that lost its race was reported as filed.** Twelve of fifteen call
   sites ignored `publish()`'s result, so a record that never reached the ref
   still printed "recorded". Nothing was lost — it stays in `mine/` and goes out

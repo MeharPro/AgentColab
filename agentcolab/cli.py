@@ -1480,7 +1480,7 @@ def cmd_relay(store: Store, args: argparse.Namespace) -> int:
             str(record.get("kind") or kind), str(record.get("agent") or "?"), subject,
             body=str(record.get("body") or "")[:1200],
             fields={"id": str(record.get("id"))},
-            channel=channel, wire_line=wire.from_message(record) if kind == "msg" else "",
+            channel=channel, wire=wire.from_message(record) if kind == "msg" else "",
             trust=str(classified.get("_trust") or "unverified"))
         sent += chat.post(store.config(), event)
     if events:

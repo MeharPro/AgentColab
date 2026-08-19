@@ -348,6 +348,39 @@ class ChatAdapters(unittest.TestCase):
         self.assertEqual(len(FakeAPI.created), first)
 
 
+class EventContract(unittest.TestCase):
+    """Every construction of Event must match its signature.
+
+    `colab relay` shipped passing `wire_line=` where Event takes `wire=`, so it
+    raised TypeError on every run that had anything to relay — and that is the
+    one path holding the bot token, the reason contributors need no chat
+    credentials. Nothing caught it: the scheduled workflow was green because
+    without the secret it exits before reaching the call, which is the
+    "flagship feature must work in automation" trap.
+
+    Checked structurally rather than by example, so a future call site with a
+    typo'd keyword fails here instead of in somebody's CI at 3am.
+    """
+
+    def test_no_call_site_passes_an_argument_event_does_not_take(self):
+        import ast
+        import inspect
+        allowed = set(inspect.signature(base.Event.__init__).parameters) - {"self"}
+        root = Path(__file__).resolve().parent.parent / "agentcolab"
+        offenders = []
+        for path in sorted(root.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+                if name != "Event":
+                    continue
+                for kw in node.keywords:
+                    if kw.arg and kw.arg not in allowed:
+                        offenders.append(f"{path.name}:{node.lineno} passes {kw.arg!r}")
+        self.assertEqual(offenders, [], "Event called with an argument it does not accept")
+
+
 class CustomChannels(unittest.TestCase):
     """A project inventing its own rooms is configuration, not a code change."""
 
