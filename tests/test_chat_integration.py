@@ -424,6 +424,36 @@ class MCPTransportSafety(unittest.TestCase):
         self.assertEqual(raw, [], f"these bypass _arg: {raw}")
 
 
+class MCPErrorReporting(unittest.TestCase):
+    """A crashing tool must say why, not return a bland empty result."""
+
+    def test_a_raising_command_surfaces_its_cause(self):
+        import argparse
+        from agentcolab import mcp
+
+        def boom(store, args):
+            print("partial output")
+            raise AttributeError("no attribute 'offline'")
+
+        with self.assertRaises(RuntimeError) as caught:
+            mcp._capture(boom, None, argparse.Namespace())
+        message = str(caught.exception)
+        self.assertIn("AttributeError", message)
+        self.assertIn("offline", message)
+        self.assertIn("partial output", message, "output before the crash was lost")
+
+    def test_a_nonzero_exit_code_is_data_not_an_error(self):
+        import argparse
+        from agentcolab import mcp
+
+        def claimed(store, args):
+            print("claimed by mallory")
+            return 2
+
+        self.assertEqual(mcp._capture(claimed, None, argparse.Namespace()),
+                         "claimed by mallory")
+
+
 class MCPArgumentContract(unittest.TestCase):
     """Every MCP tool must pass what its command actually reads.
 

@@ -330,6 +330,44 @@ class Attribution(unittest.TestCase):
         self.assertEqual(got["agent"], "victoria")
 
 
+class ForkScope(unittest.TestCase):
+    """A fork only speaks for the agents its scope authorises.
+
+    view() enforced this and adopt_own() did not, so a fork scoped to "mallory"
+    could publish findings/<victim>/f-evil.json and the victim's next rejoin
+    would adopt it into mine/ and republish it under the victim's own
+    signature — attacker content wearing somebody else's name.
+    """
+
+    def test_scope_admits_only_its_own_agents(self):
+        from agentcolab.store import Store
+        self.assertTrue(Store._in_scope("mallory", "mallory"))
+        self.assertTrue(Store._in_scope("mallory-bot", "mallory"))
+        self.assertTrue(Store._in_scope("anyone", ""), "no scope means no restriction")
+        self.assertFalse(Store._in_scope("victim", "mallory"))
+        self.assertFalse(Store._in_scope("maintainer", "mallory"))
+
+    def test_nothing_reimplements_the_scope_check(self):
+        # view() and adopt_own() enforced this separately once and one of them
+        # forgot, so the rule is: exactly one place knows what scope means.
+        source = (Path(__file__).resolve().parent.parent
+                  / "agentcolab" / "store.py").read_text()
+        body = source[source.index("def _in_scope"):]
+        body = body[:body.index("\n    @staticmethod", 1)]
+        outside = source.replace(body, "")
+        self.assertNotIn('startswith(f"{scope}-")', outside,
+                         "a second copy of the scope rule has appeared")
+        self.assertNotIn("owner != scope", outside)
+
+    def test_adopt_own_applies_it(self):
+        source = (Path(__file__).resolve().parent.parent
+                  / "agentcolab" / "store.py").read_text()
+        adopt = source[source.index("def adopt_own"):]
+        adopt = adopt[:adopt.index("\n    def ", 1)]
+        self.assertIn("_in_scope", adopt,
+                      "adopt_own writes to mine/ without checking the fork's scope")
+
+
 class DealDeterminism(unittest.TestCase):
     """Ties are the normal case, not the edge case: ids are minted in a loop."""
 

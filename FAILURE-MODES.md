@@ -171,6 +171,19 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **A fork could inject records you then republished as your own.** `view()`
+  applied each source's `scope`; `adopt_own()` — which writes straight into
+  `mine/` during a rejoin — did not. A fork scoped to `mallory` could publish
+  `findings/<you>/f-evil.json`, and your next rejoin adopted it and republished
+  it under your signature. Two functions enforcing the same boundary
+  separately, one of which forgot. There is now one `_in_scope` helper and a
+  test that fails if a second copy of the rule appears.
+- **Every MCP tool failure was invisible.** `_capture` wrapped the call in
+  `contextlib.suppress(Exception)`, so a crash became "(no output, exit 1)" with
+  no cause — which is exactly how two tools shipped broken on every invocation.
+  Exceptions now propagate with the partial output attached, and the server
+  marks the result `isError`. A non-zero *exit code* is still just data: `colab
+  check` exiting 2 is an answer, not a malfunction.
 - **A fork could impersonate the maintainer, in direct contradiction of the
   docstring promising it could not.** Scope is enforced on the record's *path* —
   a fork scoped to `mallory` only has `*/mallory/` honoured — but attribution

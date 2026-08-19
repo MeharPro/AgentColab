@@ -140,14 +140,31 @@ TOOLS: dict[str, dict[str, Any]] = {
 
 
 def _capture(fn: Callable[..., int], store: Store, args: argparse.Namespace) -> str:
-    """Run a CLI command and hand the model exactly what a human would see."""
+    """Run a CLI command and hand the model exactly what a human would see.
+
+    A raised exception is re-raised with whatever the command managed to print
+    attached, so the caller can mark the result isError and the model can read
+    what actually went wrong. It used to be swallowed by
+    `contextlib.suppress(Exception)`, which turned every crash into a bland
+    "(no output, exit 1)" -- and that is how two tools shipped broken on every
+    single invocation without anything noticing.
+
+    A non-zero *exit code* is left alone: `colab check` exiting 2 for a claimed
+    path is an answer, not a malfunction.
+    """
     buffer = io.StringIO()
     err = io.StringIO()
     code = 1
+    failure: BaseException | None = None
     with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(err):
-        with contextlib.suppress(Exception):
+        try:
             code = int(fn(store, args) or 0)
+        except Exception as exc:
+            failure = exc
     text = (buffer.getvalue() + err.getvalue()).strip()
+    if failure is not None:
+        detail = f"{type(failure).__name__}: {failure}"
+        raise RuntimeError(f"{detail}\n{text}" if text else detail) from failure
     return text or f"(no output, exit {code})"
 
 

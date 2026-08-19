@@ -513,6 +513,18 @@ class Store:
         return out
 
     @staticmethod
+    def _in_scope(owner: str, scope: str) -> bool:
+        """Does a fork scoped to `scope` get to speak for `owner`?
+
+        Shared by view() and adopt_own() on purpose. They enforced this
+        separately, one of them forgot, and a fork could inject records that the
+        victim then republished under their own signature.
+        """
+        if not scope:
+            return True
+        return owner == scope or owner.startswith(f"{scope}-")
+
+    @staticmethod
     def _owner_of(path: str) -> str:
         """`msgs/<agent>/<id>.json` and `agents/<agent>.json` both name an owner.
 
@@ -554,7 +566,7 @@ class Store:
                 if not owner:
                     continue
                 # A fork may only speak for the agents its owner controls.
-                if scope and owner != scope and not owner.startswith(f"{scope}-"):
+                if not self._in_scope(owner, scope):
                     continue
                 existing = merged.get(path)
                 if existing is None or _newer(data, existing):
@@ -684,6 +696,13 @@ class Store:
         """
         recovered = 0
         for source in self.sources():
+            scope = source.get("scope") or ""
+            # The same scope boundary view() applies. Without it, a fork scoped
+            # to somebody else could publish findings/<us>/f-x.json, and the next
+            # rejoin would adopt it into mine/ and republish it under our own
+            # signature -- attacker content wearing our name.
+            if not self._in_scope(self.agent, scope):
+                continue
             for path, data in self._tree_records(self._source_ref(source["name"])).items():
                 if self._owner_of(path) != self.agent:
                     continue
