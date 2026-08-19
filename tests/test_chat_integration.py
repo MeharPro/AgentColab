@@ -376,10 +376,41 @@ class EventContract(unittest.TestCase):
     typo'd keyword fails here instead of in somebody's CI at 3am.
     """
 
-    def test_no_call_site_passes_an_argument_event_does_not_take(self):
+    # Every internal seam where a typo'd keyword would raise TypeError at
+    # runtime instead of failing here. Cheap to extend; add anything whose call
+    # sites are scattered across modules.
+    CHECKED = {
+        "Event": None,          # resolved below, needs the class
+        "mirror": "agentcolab.session:mirror",
+        "sign_and_put": "agentcolab.session:sign_and_put",
+        "claim_record": "agentcolab.board:claim_record",
+        "classify": "agentcolab.identity:classify",
+        "encode": "agentcolab.wire:encode",
+    }
+
+    def _signature(self, spec):
+        """Accepted keyword names, or None when the callee takes **kwargs.
+
+        A function with **fields accepts any keyword by design — wire.encode
+        turns them into wire fields — so checking names there would flag correct
+        code.
+        """
+        import importlib
+        import inspect
+        module, _, attr = spec.partition(":")
+        params = inspect.signature(
+            getattr(importlib.import_module(module), attr)).parameters
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return None
+        return set(params)
+
+    def test_no_call_site_passes_an_argument_the_callee_does_not_take(self):
         import ast
         import inspect
-        allowed = set(inspect.signature(base.Event.__init__).parameters) - {"self"}
+        allowed = {"Event": set(inspect.signature(base.Event.__init__).parameters) - {"self"}}
+        for name, spec in self.CHECKED.items():
+            if spec:
+                allowed[name] = self._signature(spec)
         root = Path(__file__).resolve().parent.parent / "agentcolab"
         offenders = []
         for path in sorted(root.rglob("*.py")):
@@ -387,12 +418,14 @@ class EventContract(unittest.TestCase):
                 if not isinstance(node, ast.Call):
                     continue
                 name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
-                if name != "Event":
+                if name not in allowed or allowed[name] is None:
                     continue
                 for kw in node.keywords:
-                    if kw.arg and kw.arg not in allowed:
-                        offenders.append(f"{path.name}:{node.lineno} passes {kw.arg!r}")
-        self.assertEqual(offenders, [], "Event called with an argument it does not accept")
+                    if kw.arg and kw.arg not in allowed[name]:
+                        offenders.append(
+                            f"{path.name}:{node.lineno} calls {name}({kw.arg}=...)")
+        self.assertEqual(offenders, [],
+                         "a call site passes an argument its callee does not accept")
 
 
 class MCPTransportSafety(unittest.TestCase):

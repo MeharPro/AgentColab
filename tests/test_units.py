@@ -332,6 +332,56 @@ class Attribution(unittest.TestCase):
         self.assertEqual(got["agent"], "victoria")
 
 
+class Timestamps(unittest.TestCase):
+    """Timestamps arrive from peers, so parsing must never hand back a naive one."""
+
+    def test_every_form_compares_against_now(self):
+        for value in ("2026-08-19T10:00:00Z", "2026-08-19T10:00:00",
+                      "2026-08-19T10:00:00+02:00"):
+            parsed = records.parse_iso(value)
+            self.assertIsNotNone(parsed, value)
+            self.assertIsNotNone(parsed.tzinfo, f"{value} parsed naive")
+            records.now() - parsed          # raised TypeError before the fix
+
+    def test_a_missing_offset_is_read_as_utc(self):
+        self.assertEqual(records.parse_iso("2026-08-19T10:00:00"),
+                         records.parse_iso("2026-08-19T10:00:00Z"))
+
+    def test_nonsense_is_still_none(self):
+        self.assertIsNone(records.parse_iso("garbage"))
+        self.assertIsNone(records.parse_iso(""))
+
+
+class LeaseRenewal(unittest.TestCase):
+    """Renewing a lease must not restart the clock winner() sorts on."""
+
+    class _Store:
+        agent = "alice"
+        repo_root = Path(".")
+
+    def test_a_renewal_keeps_its_original_start(self):
+        first = board.claim_record(self._Store(), "t-1", lease="4h")
+        again = board.claim_record(self._Store(), "t-1", lease="4h", previous=first)
+        self.assertEqual(again["created_at"], first["created_at"],
+                         "renewing restarted the clock, so a later challenger wins")
+        self.assertNotEqual(again["expires_at"], "", "the lease should still extend")
+        self.assertTrue(again["renewed_at"])
+
+    def test_a_fresh_take_starts_now(self):
+        fresh = board.claim_record(self._Store(), "t-2", lease="4h")
+        self.assertTrue(fresh["created_at"])
+        self.assertEqual(fresh["renewed_at"], "")
+
+    def test_the_agent_doing_the_work_keeps_a_contested_task(self):
+        alice = board.claim_record(self._Store(), "t-1", lease="4h")
+        alice["created_at"] = "2026-01-01T10:00:00Z"
+        bob = {"agent": "bob", "created_at": "2026-01-01T10:05:00Z"}
+        self.assertEqual(board.resolve_take([alice, bob])["agent"], "alice")
+        renewed = board.claim_record(self._Store(), "t-1", lease="4h", previous=alice)
+        self.assertEqual(board.resolve_take([renewed, bob])["agent"], "alice",
+                         "renewing handed the task to the agent who took it second")
+
+
 class WireInjection(unittest.TestCase):
     def test_a_peer_controlled_id_cannot_forge_a_record(self):
         # digest() is what an agent reads as the authoritative list of messages.

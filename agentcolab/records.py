@@ -34,15 +34,25 @@ def iso(dt: datetime | None = None) -> str:
 
 
 def parse_iso(value: str | None) -> datetime | None:
+    """Always timezone-aware, or None.
+
+    Timestamps arrive from peers, and anything that is not exactly our own
+    `...Z` format used to fall through to fromisoformat and could come back
+    *naive* — which then raised TypeError the moment it met `now()`, taking out
+    lease expiry, claim expiry and `ago()` on nothing worse than a peer writing
+    an offset-free timestamp. A missing offset is read as UTC, which is the only
+    thing this format ever means here.
+    """
     if not value:
         return None
     try:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         try:
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         except (ValueError, TypeError):
             return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def ago(value: str | None) -> str:

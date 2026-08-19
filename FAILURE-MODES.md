@@ -171,6 +171,16 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **Renewing your lease handed your task to a competitor.** `created_at` is what
+  the take resolver sorts on, earliest first, and every renewal rewrote it to
+  now — so the agent actually doing the work renewed, their start time jumped
+  forward, and a challenger who took the task *second* became the winner. A
+  renewal keeps its original start now and records `renewed_at` separately.
+- **A peer timestamp without a `Z` crashed every comparison it touched.**
+  `parse_iso` fell through to `fromisoformat` and could return a *naive*
+  datetime, which raises `TypeError` the moment it meets an aware one — taking
+  out lease expiry, claim expiry and `ago()` on nothing worse than a peer
+  writing an offset-free timestamp. A missing offset is read as UTC.
 - **Reading a claimed file could get you accused of editing it.** Any `>`
   redirect counted as an in-place mutation, so `grep TODO src/core.py >
   /tmp/out` implicated `src/core.py` and sent its owner a "someone edited into

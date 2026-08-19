@@ -515,7 +515,11 @@ def cmd_take(store: Store, args: argparse.Namespace) -> int:
         eprint(f'       colab send "want to take {task["id"]}" --to {task["owner"]}')
         if not args.force:
             return 2
-    record = board.claim_record(store, task["id"], lease=args.lease, note=args.note)
+    # Our own existing take, if this is a renewal rather than a fresh claim.
+    held = next((t for t in (task.get("takes") or [])
+                 if t.get("agent") == store.agent), None)
+    record = board.claim_record(store, task["id"], lease=args.lease, note=args.note,
+                                previous=held)
     session.sign_and_put(store, f"tasks/{store.agent}/{record['id']}.json", record)
     note = _publish(store, f"take {task['id']}")
     session.mirror(store, "take", str(task.get("title")),

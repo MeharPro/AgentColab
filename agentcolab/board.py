@@ -95,14 +95,23 @@ def task_record(store: Store, title: str, *, body: str = "", paths: Iterable[str
 
 
 def claim_record(store: Store, task_id: str, *, lease: str = DEFAULT_LEASE,
-                 note: str = "") -> dict[str, Any]:
+                 note: str = "", previous: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A take record. Renewing extends the lease without restarting the clock.
+
+    `created_at` is what winner() sorts on, earliest first, so rewriting it on
+    every renewal handed a contested task to whoever took it *second*: the agent
+    actually doing the work renewed, their start time jumped to now, and the
+    challenger's older record won. A renewal must keep the original start.
+    """
+    started = str((previous or {}).get("created_at") or "") if previous else ""
     return {
         "id": f"take-{task_id}",
         "kind": "take",
         "task": str(task_id),
         "agent": store.agent,
         "note": records.scrub(note)[:400],
-        "created_at": iso(),
+        "created_at": started or iso(),
+        "renewed_at": iso() if started else "",
         "expires_at": in_seconds(records.parse_duration(lease)),
         "branch": records.fingerprint(store.repo_root).get("git_branch", ""),
     }
