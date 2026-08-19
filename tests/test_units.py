@@ -287,6 +287,49 @@ class RecordPaths(unittest.TestCase):
         self.assertEqual(Store._owner_of("tasks/fable-arch/t-1.json"), "fable-arch")
 
 
+class Attribution(unittest.TestCase):
+    """Who a record is from is decided by the directory, not by the record.
+
+    store.py's own docstring promises "a fork cannot impersonate the
+    maintainer". Scope is enforced on the path, but attribution used to come
+    from the payload through `setdefault` — and every honest writer sets `agent`
+    in the body, so setdefault never fired and the body always won. A fork
+    scoped to "mallory" could publish claims/mallory/c.json claiming
+    `"agent": "maintainer"` and every consumer printed maintainer.
+    """
+
+    def _attribute(self, item, path):
+        # Pass the class as `self`: _attribute only reaches self._owner_of,
+        # which is a staticmethod, so no instance state is needed.
+        from agentcolab.store import Store
+        return Store._attribute(Store, item, path)
+
+    def test_a_body_cannot_claim_someone_elses_name(self):
+        got = self._attribute({"agent": "maintainer", "id": "c-1"},
+                              "claims/mallory/c-1.json")
+        self.assertEqual(got["agent"], "mallory", "the body overrode the directory")
+        self.assertEqual(got["_claimed_agent"], "maintainer",
+                         "the discrepancy should stay visible, not vanish")
+
+    def test_an_honest_record_is_unchanged_and_unflagged(self):
+        got = self._attribute({"agent": "mallory", "id": "c-1"},
+                              "claims/mallory/c-1.json")
+        self.assertEqual(got["agent"], "mallory")
+        self.assertNotIn("_claimed_agent", got)
+
+    def test_a_record_with_no_owning_directory_keeps_its_body(self):
+        got = self._attribute({"agent": "someone"}, "not-a-kind/x.json")
+        self.assertEqual(got["agent"], "someone")
+
+    def test_a_renamed_agent_still_owns_its_records(self):
+        # cmd_rename moves directories without rewriting bodies. Path-authoritative
+        # attribution makes that correct for free; body-authoritative made every
+        # `record["agent"] == me` comparison stop matching the agent's own work.
+        got = self._attribute({"agent": "victim", "id": "t-1"},
+                              "tasks/victoria/t-1.json")
+        self.assertEqual(got["agent"], "victoria")
+
+
 class DealDeterminism(unittest.TestCase):
     """Ties are the normal case, not the edge case: ids are minted in a loop."""
 

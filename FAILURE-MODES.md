@@ -171,6 +171,18 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **A fork could impersonate the maintainer, in direct contradiction of the
+  docstring promising it could not.** Scope is enforced on the record's *path* —
+  a fork scoped to `mallory` only has `*/mallory/` honoured — but attribution
+  was read from the record's *body* via `setdefault`, and since every honest
+  writer sets `agent` in the body, the setdefault never fired and the body was
+  always authoritative. So a fork could publish `claims/mallory/c.json` saying
+  `"agent": "maintainer"` and `colab claims`, `colab check` and `colab inbox`
+  all printed "maintainer" with no caveat. Two mechanisms disagreed and the
+  weaker one won. Attribution now comes from the path, with any disagreement
+  preserved in `_claimed_agent` rather than dropped. Verified against the full
+  attacker repro. The same fix repairs `colab rename`, which moved directories
+  without rewriting bodies and so detached an agent from its own records.
 - **A channel nobody had provisioned swallowed its messages into `#link`.** A
   project could define `bs-chat`, and `colab say bs-chat "..."` would report
   success while the message landed somewhere else entirely — the feature quietly

@@ -566,14 +566,38 @@ class Store:
         merged.update(self._own_records())
         return merged
 
+    def _attribute(self, item: dict[str, Any], path: str) -> dict[str, Any]:
+        """Attribute a record to the directory that owns it, never to its body.
+
+        This is the line that makes the scope guarantee above real. Ownership is
+        enforced on the *path* -- a fork scoped to "mallory" only has records
+        under `*/mallory/` honoured -- but attribution used to come from the
+        payload via setdefault, and every honest writer already sets `agent` in
+        the body, so setdefault never fired and the body was always authoritative.
+        A fork could publish `claims/mallory/c.json` saying `"agent":
+        "maintainer"` and every consumer printed "maintainer".
+
+        The disagreement is kept in `_claimed_agent` rather than dropped: it is
+        always either a forgery or a record left behind by a rename, and both are
+        worth being able to see.
+        """
+        owner = self._owner_of(path)
+        if owner:
+            claimed = str(item.get("agent") or "")
+            if claimed and claimed != owner:
+                item["_claimed_agent"] = claimed
+            item["agent"] = owner
+        else:
+            item.setdefault("agent", "")
+        return item
+
     def read_all(self, kind: str, *, refresh: bool = False) -> list[dict[str, Any]]:
         """Every record of one family, from everyone, oldest first."""
         out: list[dict[str, Any]] = []
         for path, data in self.view(refresh=refresh).items():
             if not path.startswith(f"{kind}/"):
                 continue
-            item = dict(data)
-            item.setdefault("agent", self._owner_of(path))
+            item = self._attribute(dict(data), path)
             item["_path"] = path
             out.append(item)
         out.sort(key=lambda item: str(item.get("ts") or item.get("created_at") or ""))
@@ -584,9 +608,7 @@ class Store:
         for path, data in self.view(refresh=refresh).items():
             if not path.startswith("agents/") or path.count("/") != 1:
                 continue
-            item = dict(data)
-            item.setdefault("agent", self._owner_of(path))
-            out.append(item)
+            out.append(self._attribute(dict(data), path))
         out.sort(key=lambda item: str(item.get("agent") or ""))
         return out
 
