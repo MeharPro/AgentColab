@@ -649,8 +649,22 @@ def cmd_inbox(store: Store, args: argparse.Namespace) -> int:
             print(records.frame_untrusted(str(msg.get("body"))[:600]))
         return 0
     mail = session.unread(store)
+    # A project that set a minimum trust level meant it. Records below it are
+    # held back rather than mixed in, and the count is always reported -- a
+    # silently shortened inbox would be its own kind of lie.
+    classified = session.classify_all(store, mail)
+    if args.all:
+        mail, withheld = classified, []
+    else:
+        mail, withheld = session.below_minimum(store, classified)
     if not mail:
+        if withheld:
+            return _ok(f"inbox clear ({len(withheld)} held below "
+                       f"{session.require_trust(store)} — `colab inbox --all` to see them)")
         return _ok("inbox clear")
+    if withheld:
+        eprint(f"colab: {len(withheld)} record(s) held below this project's minimum "
+               f"trust of {session.require_trust(store)}. `colab inbox --all` shows them.")
     if args.wire:
         print(wire.digest(mail, limit=args.limit))
         return 0
@@ -668,6 +682,12 @@ def cmd_read(store: Store, args: argparse.Namespace) -> int:
         eprint(f"colab: no record {args.id!r}")
         return 1
     trusted = session.classify_all(store, [msg])[0]
+    _, withheld = session.below_minimum(store, [trusted])
+    if withheld:
+        eprint(f"colab: this record is {trusted.get('_trust')}, below this "
+               f"project's minimum of {session.require_trust(store)}.")
+        eprint("     Showing it anyway, clearly marked — refusing to show a record "
+               "you asked for by id would just send you to `cat`.")
     print(f"{msg.get('id')} · from {msg.get('agent')} · {ago(msg.get('ts'))} · "
           f"trust: {trusted.get('_trust')}")
     if msg.get("paths"):
@@ -2118,6 +2138,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("inbox", help="unread messages")
     p.add_argument("--chat", action="store_true", help="messages from humans instead")
     p.add_argument("--wire", action="store_true", help="compact form")
+    p.add_argument("--all", action="store_true",
+                   help="include records below the project's minimum trust")
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_inbox)
 

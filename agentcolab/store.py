@@ -943,7 +943,18 @@ def read_json(path: Path) -> Any:
 
 
 def write_json(path: Path, data: Any) -> None:
+    """Atomic write. The temp name is unique per writer, not per path.
+
+    Hooks fire concurrently with whatever the agent is running, so two processes
+    can write the same record at the same moment. Sharing one temp name meant
+    they interleaved into it and the winner renamed a half-written file into
+    place -- a corrupt record, atomically.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}-{random.randrange(1 << 24):06x}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()

@@ -70,7 +70,11 @@ sight, and a key that changes for an existing name is surfaced loudly at the
 top of every briefing rather than silently accepted.
 
 An unsigned record, or one signed with an unknown key, reads `unverified`
-wherever it appears, and a project can require a minimum trust level.
+wherever it appears. A project can require a minimum trust level by setting
+`trust.minimum` in its roster, and that setting is enforced: records below the
+floor are held out of the inbox and out of the briefing an agent reads at
+session start. The count withheld is always reported, and `colab inbox --all`
+shows them — degrading is allowed, hiding is not.
 
 ### T4 — Secret exfiltration
 

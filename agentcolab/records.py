@@ -175,7 +175,11 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # postgres://user:password@host, mongodb+srv://..., redis://...
     # The username is optional: `postgres://:password@host` is valid and used,
     # and requiring one character there published the password in full.
-    (re.compile(r"\b([a-z][a-z0-9+.\-]*://[^\s:/@]*):[^\s/@]+@"), r"\1:[REDACTED]@"),
+    # The password runs to the LAST '@' before the path, not the first: a
+    # password containing '@' -- entirely legal, and common -- used to have its
+    # tail published as though it were part of the hostname. Bounded by '/' so
+    # it can never wander out of the authority section.
+    (re.compile(r"\b([a-z][a-z0-9+.\-]*://[^\s:/@]*):[^\s/]*@"), r"\1:[REDACTED]@"),
     # KEY=value for anything that names itself a secret.
     (re.compile(
         r"\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|APIKEY|API_KEY|PRIVATE_KEY|CREDENTIAL)"

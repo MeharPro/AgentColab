@@ -171,6 +171,24 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **`trust.minimum` was documented, printed, and never enforced.**
+  `docs/security.md` said "a project can require a minimum trust level";
+  `require_trust()` read the setting; nothing acted on it. A security control
+  that exists in the documentation and not in the code is worse than no control,
+  because people arrange their work around it. It is now applied to the inbox
+  and to the briefing an agent reads at session start, always reporting how many
+  records were held back — a silently shortened inbox would be its own kind of
+  lie — with `colab inbox --all` to see them. (That flag did not exist either
+  until the message started pointing at it.)
+- **A password containing `@` published its own tail.** The userinfo pattern
+  stopped at the *first* `@`, so `postgres://user:p@ssw0rd@host/db` redacted
+  `p` and printed `ssw0rd` as though it were part of the hostname. It now runs
+  to the last `@` before the path.
+- **Two concurrent writers could publish a truncated record, atomically.**
+  `write_json` used one temp name per path, and hooks fire concurrently with
+  whatever the agent is running, so two processes interleaved into the same temp
+  file and the winner renamed a half-written one into place. The temp name is
+  now unique per writer.
 - **The first non-ASCII character broke the tool on Windows, three ways.**
   Python there defaults its streams and file I/O to the ANSI codepage, not
   UTF-8. So the MCP server died decoding its own transport, every hook became a

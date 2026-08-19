@@ -142,6 +142,26 @@ def classify_all(store: Store, items: Iterable[dict[str, Any]]) -> list[dict[str
     return [identity.classify(item, ros, allowed, store.shared) for item in items]
 
 
+def below_minimum(store: Store, items: Iterable[dict[str, Any]]
+                  ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split classified records into (acceptable, below the project's minimum).
+
+    `trust.minimum` was documented in docs/security.md as something "a project
+    can require", was read by require_trust(), and was then only ever *printed*.
+    A security control that exists in the docs and not in the code is worse than
+    no control at all, because people arrange their work around it.
+
+    Degrading is allowed and lying is not, so this never silently drops
+    anything: callers report the withheld count.
+    """
+    floor = identity.trust_rank(require_trust(store))
+    keep, held = [], []
+    for item in items:
+        target = keep if identity.trust_rank(item.get("_trust")) >= floor else held
+        target.append(item)
+    return keep, held
+
+
 def pin_peers(store: Store) -> list[str]:
     """Remember every peer's signing key, and shout if one ever changes.
 
@@ -376,7 +396,7 @@ def briefing(store: Store, *, compact: bool = False) -> str:
     here. Anything a human wrote elsewhere is fenced and labelled untrusted.
     """
     me = store.agent
-    peers = classify_all(store, store.live_peers())
+    peers, _ = below_minimum(store, classify_all(store, store.live_peers()))
     waiting = awaiting_reply(store)
     mail = unread(store)
     rooms = chat_unread(store)

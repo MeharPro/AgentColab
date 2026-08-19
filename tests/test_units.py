@@ -112,6 +112,18 @@ class Scrubbing(unittest.TestCase):
         self.assertNotIn("supersecretpw", out)
         self.assertIn("db.example.com", out)
 
+    def test_a_password_containing_an_at_sign_does_not_leak_its_tail(self):
+        for url, secret in (("postgres://user:p@ssw0rd@db.example.com/app", "ssw0rd"),
+                            ("redis://u:a@b@c@host:6379/0", "a@b@c"),
+                            ("mongodb+srv://u:p%40ss@cluster.net/db", "p%40ss")):
+            out = records.scrub(url)
+            self.assertNotIn(secret, out, url)
+            self.assertIn("[REDACTED]", out, url)
+
+    def test_a_url_with_no_credentials_is_left_alone(self):
+        self.assertEqual(records.scrub("https://example.com/path@notacreds"),
+                         "https://example.com/path@notacreds")
+
     def test_a_pem_survives_neither_raw_nor_json_escaped(self):
         raw = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\n-----END PRIVATE KEY-----"
         self.assertNotIn("MIIEvQIBADANBgkq", records.scrub(raw))
@@ -330,6 +342,61 @@ class Attribution(unittest.TestCase):
         got = self._attribute({"agent": "victim", "id": "t-1"},
                               "tasks/victoria/t-1.json")
         self.assertEqual(got["agent"], "victoria")
+
+
+class TrustMinimum(unittest.TestCase):
+    """A documented control that does nothing is worse than no control."""
+
+    class _Store:
+        def __init__(self, floor): self._floor = floor
+        def config(self): return {}
+
+    def _split(self, floor, items):
+        from agentcolab import session
+        real = session.require_trust
+        session.require_trust = lambda store: floor
+        try:
+            return session.below_minimum(None, items)
+        finally:
+            session.require_trust = real
+
+    def test_records_below_the_floor_are_separated(self):
+        items = [{"id": "a", "_trust": "unverified"}, {"id": "b", "_trust": "verified"},
+                 {"id": "c", "_trust": "pinned"}]
+        keep, held = self._split("pinned", items)
+        self.assertEqual([i["id"] for i in keep], ["b", "c"])
+        self.assertEqual([i["id"] for i in held], ["a"])
+
+    def test_the_default_floor_keeps_everything(self):
+        items = [{"id": "a", "_trust": "unverified"}, {"id": "b", "_trust": "chat"}]
+        keep, held = self._split("unverified", items)
+        self.assertEqual(len(keep), 1)
+        self.assertEqual(len(held), 1, "chat ranks below unverified")
+
+    def test_nothing_is_dropped_silently(self):
+        keep, held = self._split("verified", [{"id": "a", "_trust": "unverified"}])
+        self.assertEqual(keep, [])
+        self.assertEqual(len(held), 1, "withheld records must stay countable")
+
+    def test_the_flag_that_reveals_them_exists(self):
+        # The message points at `colab inbox --all`; it has to be real.
+        source = (Path(__file__).resolve().parent.parent
+                  / "agentcolab" / "cli.py").read_text(encoding="utf-8")
+        self.assertIn('p.add_argument("--all"', source)
+
+
+class ConcurrentWrites(unittest.TestCase):
+    def test_two_writers_cannot_interleave_into_one_temp_file(self):
+        import concurrent.futures
+        from agentcolab.store import write_json
+        target = Path(tempfile.mkdtemp(prefix="agentcolab-cw-")) / "rec.json"
+        self.addCleanup(shutil.rmtree, str(target.parent), ignore_errors=True)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(lambda n: write_json(target, {"n": n, "pad": "x" * 2000}),
+                          range(200)))
+        json.loads(target.read_text(encoding="utf-8"))      # must not be truncated
+        strays = [p.name for p in target.parent.iterdir() if p.name != "rec.json"]
+        self.assertEqual(strays, [], "temp files were left behind")
 
 
 class TextEncoding(unittest.TestCase):
