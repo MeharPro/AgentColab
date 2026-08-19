@@ -19,7 +19,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 ALLOWED = {
     "__future__", "argparse", "ast", "contextlib", "datetime", "fcntl",
     "functools", "getpass", "hashlib", "hmac", "io", "json", "os", "pathlib",
-    "platform", "re", "shlex", "shutil", "socket", "subprocess", "sys",
+    "platform", "random", "re", "shlex", "shutil", "socket", "subprocess", "sys",
     "tempfile", "time", "typing", "unittest", "urllib", "uuid", "agentcolab",
     "concurrent",
 }

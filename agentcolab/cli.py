@@ -38,6 +38,29 @@ def _ok(text: str = "") -> int:
     return 0
 
 
+def _publish(store: Store, message: str) -> str:
+    """Publish, and return a note if it did not land.
+
+    Twelve of fifteen call sites used to ignore the result, so a record that
+    never reached the ref was still reported as filed. It is not lost — it stays
+    in `mine/` and goes out on the next sync — but telling an agent its
+    heads-up is published when nobody can see it is how two agents end up
+    working from different pictures.
+    """
+    if not store.push_url:
+        return "  (local only — no writable remote)"
+    ok, detail = store.publish(message)
+    if ok:
+        return ""
+    # git is chatty on failure; the first line is the cause and the rest is
+    # advice aimed at a human running git by hand.
+    detail = (detail or "").strip().splitlines()
+    detail = detail[0] if detail else "unknown error"
+    return (f"\n  NOT PUBLISHED YET: {detail[:160]}\n"
+            f"  It is saved locally and goes out on your next `colab sync`. "
+            f"Peers cannot see it until then.")
+
+
 # ================================================================ join
 
 WELCOME = """\
@@ -304,6 +327,10 @@ def cmd_status(store: Store, args: argparse.Namespace) -> int:
         session.refresh_if_stale(store, force=True)
     me = store.agent
     peers = store.live_peers()
+    pending = store.unpublished()
+    if pending:
+        print(f"  {pending} record(s) written here have not reached the remote yet — "
+              f"`colab sync` to publish")
     print(f"colab · {store.project} · you are `{me}`"
           + ("" if store.push_url else "  (read-only: no writable remote)"))
     print(f"     synced {ago(store.local().get('last_sync'))}"
@@ -459,8 +486,7 @@ def cmd_task(store: Store, args: argparse.Namespace) -> int:
         store, " ".join(args.title), body=_body(args.body), paths=_paths(store, args.paths),
         priority=args.priority, size=args.size, tags=args.tag or [], deps=args.dep or [])
     session.sign_and_put(store, f"tasks/{store.agent}/{task['id']}.json", task)
-    if store.push_url:
-        store.publish(f"task {task['id']}")
+    note = _publish(store, f"task {task['id']}")
     roster = board.live_agents(store)
     owner = board.owner_of(task["id"], roster)
     session.mirror(store, "task", task["title"],
@@ -469,7 +495,7 @@ def cmd_task(store: Store, args: argparse.Namespace) -> int:
                    channel="board",
                    wire_line=wire.encode("TASK", store.agent, "*", text=task["title"],
                                          t=task["id"], sev=task["priority"]))
-    return _ok(f"{task['id']} filed · offered first to {owner}")
+    return _ok(f"{task['id']} filed · offered first to {owner}{note}")
 
 
 def cmd_take(store: Store, args: argparse.Namespace) -> int:
@@ -491,12 +517,12 @@ def cmd_take(store: Store, args: argparse.Namespace) -> int:
             return 2
     record = board.claim_record(store, task["id"], lease=args.lease, note=args.note)
     session.sign_and_put(store, f"tasks/{store.agent}/{record['id']}.json", record)
-    if store.push_url:
-        store.publish(f"take {task['id']}")
+    note = _publish(store, f"take {task['id']}")
     session.mirror(store, "take", str(task.get("title")),
                    fields={"task": task["id"], "lease": args.lease}, channel="board",
                    wire_line=wire.encode("TAKE", store.agent, "*", t=task["id"]))
-    return _ok(f"took {task['id']} · lease {args.lease} · renew with `colab take {task['id']}`")
+    return _ok(f"took {task['id']} · lease {args.lease} · renew with "
+               f"`colab take {task['id']}`{note}")
 
 
 def cmd_done(store: Store, args: argparse.Namespace) -> int:
@@ -564,14 +590,13 @@ def cmd_send(store: Store, args: argparse.Namespace) -> int:
         "ts": iso(),
     }
     session.sign_and_put(store, f"msgs/{store.agent}/{msg['id']}.json", msg)
-    if store.push_url:
-        store.publish(f"msg {msg['id']}")
+    note = _publish(store, f"msg {msg['id']}")
     line = wire.from_message(msg)
     session.charge(store, records.estimate_tokens(line), "send")
     session.mirror(store, msg["kind"], msg["subject"], body=msg["body"],
                    fields={"to": msg["to"], "paths": ", ".join(msg["paths"]) or "-"},
                    channel=args.channel, wire_line=line)
-    return _ok(f"{msg['id']} sent ({used + 1}/{session.SEND_LIMIT_PER_HOUR} this hour)")
+    return _ok(f"{msg['id']} sent ({used + 1}/{session.SEND_LIMIT_PER_HOUR} this hour){note}")
 
 
 def cmd_reply(store: Store, args: argparse.Namespace) -> int:
@@ -671,13 +696,12 @@ def cmd_finding(store: Store, args: argparse.Namespace) -> int:
         "ts": iso(),
     }
     session.sign_and_put(store, f"findings/{store.agent}/{finding['id']}.json", finding)
-    if store.push_url:
-        store.publish(f"finding {finding['id']}")
+    note = _publish(store, f"finding {finding['id']}")
     session.mirror(store, "finding", finding["title"], body=finding["body"],
                    channel="findings",
                    wire_line=wire.encode("FIND", store.agent, "*", text=finding["title"],
                                          p=finding["paths"]))
-    return _ok(f"{finding['id']} recorded")
+    return _ok(f"{finding['id']} recorded{note}")
 
 
 def cmd_known(store: Store, args: argparse.Namespace) -> int:
@@ -910,15 +934,15 @@ def cmd_bug(store: Store, args: argparse.Namespace) -> int:
     if args.capture:
         bug["capture"] = _capture(list(args.capture), store.repo_root)
     session.sign_and_put(store, f"bugs/{store.agent}/{bug['id']}.json", bug)
-    if store.push_url:
-        store.publish(f"bug {bug['id']}")
+    note = _publish(store, f"bug {bug['id']}")
     session.mirror(store, "bug", bug["title"], body=bug["body"],
                    fields={"id": bug["id"],
                            "exit": (bug.get("capture") or {}).get("exit", "-")},
                    channel="incidents",
                    wire_line=wire.encode("BUG", store.agent, "*", text=bug["title"],
                                          p=bug["paths"]))
-    return _ok(f"{bug['id']} filed · others reproduce with `colab bug-try {bug['id']}`")
+    return _ok(f"{bug['id']} filed · others reproduce with "
+               f"`colab bug-try {bug['id']}`{note}")
 
 
 def cmd_bugs(store: Store, args: argparse.Namespace) -> int:

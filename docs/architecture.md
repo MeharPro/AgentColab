@@ -110,6 +110,13 @@ it is wrong: a heartbeat every couple of minutes per agent means the ref grows
 forever and nobody ever reads it. The ref is a snapshot of *now*, so it is
 exactly one commit, always. Old objects fall out at gc.
 
+Contention is handled by retrying with **jittered** backoff. A fixed delay makes
+every racer retry on the same beat, so the agents that collided collide again —
+with six publishing at once that reliably starved one out of its attempts.
+Losing the race never costs a record (it stays in `mine/` and goes out on the
+next sync), but a late write means peers are reading stale state, so it is worth
+avoiding rather than merely surviving.
+
 **The lease is the correctness argument.** Dropping the parent makes the push a
 non-fast-forward, so `--force-with-lease` carries the weight instead: it
 succeeds only if the remote is still at the revision we built from. That is a

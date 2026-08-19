@@ -171,6 +171,22 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **A publish that lost its race was reported as filed.** Twelve of fifteen call
+  sites ignored `publish()`'s result, so a record that never reached the ref
+  still printed "recorded". Nothing was lost — it stays in `mine/` and goes out
+  on the next sync — but telling an agent its heads-up is published while nobody
+  can see it is how two agents end up working from different pictures. Failures
+  are reported inline now, and `colab` shows any unpublished count.
+- **Retry backoff was fixed, so racers collided in lockstep.** Six agents
+  publishing simultaneously reliably starved one out of its attempts. Jittered
+  now, with more attempts: eight simultaneous cross-machine writes all land
+  first time, where six used to lose one.
+- **The concurrency test was serialised and proved nothing.** Four agents on one
+  machine share the project lock, so they never actually raced — the test passed
+  even with `--force-with-lease` replaced by a plain `--force`, which is the
+  exact bug it existed to catch. It now gives each agent its own
+  `AGENTCOLAB_HOME`, which is what makes them behave like separate machines, and
+  it fails under that mutation as it should.
 - **Ownerless agents all reached for the same task.** Hashing tasks over agents
   divides them but does not deal them evenly — with six tasks and four agents it
   is ordinary for an agent to own none — and every ownerless agent then fell back

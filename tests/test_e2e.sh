@@ -237,7 +237,48 @@ out=$(colab known --about "survive losing" 2>&1)
 has "and they are still visible to everyone" "$out" "must survive losing the machine"
 
 echo
-echo "13. doctor is honest about what is missing"
+echo "13. concurrent writes do not lose anybody's work"
+# The riskiest invariant: publish is fetch/rebuild/orphan-commit/force-push-with-
+# lease, and a lost race must retry rather than clobber.
+#
+# This has to be a REAL race. Four agents on one machine share the project lock,
+# so they serialise and the compare-and-swap is never exercised — an earlier
+# version of this test passed even with the lease replaced by a plain --force,
+# which is exactly the bug it was meant to catch. Separate AGENTCOLAB_HOMEs are
+# what makes them behave like separate machines.
+RACE="$WORK/race"
+mkdir -p "$RACE"
+git init -q --bare "$RACE/hub.git"
+git -C "$RACE" clone -q hub.git seed 2>/dev/null
+( cd "$RACE/seed" && git config user.email r@example.com && git config user.name r \
+  && echo x > f.txt && git add -A && git commit -qm init && git push -q origin HEAD:main )
+for i in 1 2 3 4 5 6; do
+  git -C "$RACE" clone -q -b main hub.git "r$i" 2>/dev/null
+  ( cd "$RACE/r$i" && git config user.email "r$i@example.com" && git config user.name "r$i" )
+  AGENTCOLAB_HOME="$RACE/home$i" colab --version >/dev/null 2>&1
+  ( cd "$RACE/r$i" && AGENTCOLAB_HOME="$RACE/home$i" \
+      colab join --as "racer-$i" --yes --no-install >/dev/null 2>&1 )
+done
+for i in 1 2 3 4 5 6; do
+  ( cd "$RACE/r$i" && AGENTCOLAB_HOME="$RACE/home$i" \
+      colab finding "simultaneous lesson $i" --body "raced" >/dev/null 2>&1 ) &
+done
+wait
+landed=$(git -C "$RACE/hub.git" ls-tree -r --name-only refs/agentcolab/state 2>/dev/null | grep -c "^findings/")
+if [ "$landed" -eq 6 ]; then ok "all 6 simultaneous cross-machine writes landed"
+else bad "all 6 simultaneous cross-machine writes landed" "only $landed of 6"; fi
+commits=$(git -C "$RACE/hub.git" rev-list --count refs/agentcolab/state 2>/dev/null)
+if [ "$commits" = "1" ]; then ok "the ref is still a single snapshot, not a history"
+else bad "the ref is still a single snapshot" "$commits commits"; fi
+# Nothing may be silently dropped even if a race is lost: it stays local.
+for i in 1 2 3 4 5 6; do
+  ( cd "$RACE/r$i" && AGENTCOLAB_HOME="$RACE/home$i" colab sync --quiet >/dev/null 2>&1 )
+done
+final=$(git -C "$RACE/hub.git" ls-tree -r --name-only refs/agentcolab/state 2>/dev/null | grep -c "^findings/")
+if [ "$final" -eq 6 ]; then ok "and nothing was lost even after a retry pass"
+else bad "and nothing was lost even after a retry pass" "$final of 6"; fi
+
+echo "14. doctor is honest about what is missing"
 out=$(colab doctor 2>&1)
 has "doctor runs end to end" "$out" "transport"
 has "and reports chat is absent" "$out" "no platform set up"

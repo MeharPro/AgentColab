@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import random
 import shutil
 import subprocess
 import time
@@ -44,6 +45,11 @@ LOCAL_BRANCH = "agentcolab-state"
 
 # Record families. Each is a directory of per-agent subdirectories.
 KINDS = ("msgs", "claims", "bugs", "findings", "tasks", "reviews", "events")
+
+# Enough that a fleet publishing simultaneously all get through. Losing the race
+# costs a retry, never a record — but an agent whose write is late is an agent
+# whose peers are working from stale information.
+PUBLISH_ATTEMPTS = 8
 
 # Days after which an agent prunes its own settled records. Nobody ever deletes
 # anyone else's, so this needs no coordination.
@@ -687,7 +693,7 @@ class Store:
         with self.lock():
             self.prune_mine()
             last = ""
-            for attempt in range(5):
+            for attempt in range(PUBLISH_ATTEMPTS):
                 proc = git(["fetch", "--quiet", "--no-tags", "--depth", "1", self.push_url,
                             f"+{STATE_REF}:refs/agentcolab/push-base"],
                            cwd=self.state, check=False, timeout=timeout)
@@ -734,8 +740,14 @@ class Store:
                 if not any(marker in lowered for marker in
                            ("rejected", "non-fast-forward", "fetch first", "stale info")):
                     return False, last
-                time.sleep(0.4 * (attempt + 1))
-            return False, last or "could not publish after 5 attempts"
+                # Jittered, not fixed. A fixed delay makes every racer retry on
+                # the same beat, so the ones that collided collide again — with
+                # six agents publishing at once that reliably starved one of
+                # them out of its attempts. The record is never lost (it stays
+                # in `mine/` and goes out on the next sync) but it is late, and
+                # silently so, which is worse than slow.
+                time.sleep(random.uniform(0.15, 0.5) * (attempt + 1))
+            return False, last or f"could not publish after {PUBLISH_ATTEMPTS} attempts"
 
     def _build_tree(self, base_ref: str) -> str:
         """Remote tree, minus everything we own, plus everything we own now.
