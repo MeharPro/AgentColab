@@ -106,7 +106,7 @@ def find_signing_key(repo_root: Path | None = None) -> tuple[Path | None, bool]:
 
 def _safe_read(path: Path) -> str:
     try:
-        return path.read_text(errors="ignore")
+        return path.read_text(errors="ignore", encoding="utf-8")
     except OSError:
         return ""
 
@@ -245,9 +245,9 @@ def verify(payload: dict[str, Any], allowed: dict[str, list[str]]) -> tuple[bool
 
     with tempfile.TemporaryDirectory(prefix="colab-verify-") as tmp:
         signers = Path(tmp) / "allowed_signers"
-        signers.write_text(f"{principal} {pubkey}\n")
+        signers.write_text(f"{principal} {pubkey}\n", encoding="utf-8")
         sig_path = Path(tmp) / "record.sig"
-        sig_path.write_text(str(signature).strip() + "\n")
+        sig_path.write_text(str(signature).strip() + "\n", encoding="utf-8")
         try:
             proc = subprocess.run(
                 ["ssh-keygen", "-Y", "verify", "-f", str(signers), "-I", principal,
@@ -444,7 +444,7 @@ def classify(payload: dict[str, Any], roster: dict[str, Any],
 
 def _read_json(path: Path) -> Any:
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 
@@ -452,7 +452,7 @@ def _read_json(path: Path) -> Any:
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
 
 

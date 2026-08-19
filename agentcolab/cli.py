@@ -1389,7 +1389,7 @@ def cmd_doctor(store: Store, args: argparse.Namespace) -> int:
     check("harness detected", _detect_harness() != "unknown", _detect_harness(), fatal=False)
     settings = store.repo_root / ".claude" / "settings.json"
     if settings.is_file():
-        wired = "colab" in settings.read_text()
+        wired = "colab" in settings.read_text(encoding="utf-8")
         check("Claude Code hooks installed", wired,
               "run `colab install claude-code`" if not wired else "", fatal=False)
 
@@ -2322,6 +2322,11 @@ def _version() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Before anything reads or writes a byte. Every entry point -- the CLI, the
+    # MCP server, the hook dispatcher -- arrives here, and on Windows the
+    # standard streams would otherwise default to the ANSI codepage and fail on
+    # the first non-ASCII character in anybody's name or message.
+    records.force_utf8()
     argv = list(sys.argv[1:] if argv is None else argv)
     # `colab bug "..." --capture -- npm test --watch` has to survive argparse,
     # which treats a bare `--` as end-of-options and would swallow the command.

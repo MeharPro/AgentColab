@@ -171,6 +171,15 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **The first non-ASCII character broke the tool on Windows, three ways.**
+  Python there defaults its streams and file I/O to the ANSI codepage, not
+  UTF-8. So the MCP server died decoding its own transport, every hook became a
+  silent no-op (hooks suppress exceptions, so the failure was invisible), and
+  the harness installer wrote its files in the wrong codepage. Any agent name,
+  commit subject or message body could trigger it. Every entry point now forces
+  UTF-8 before reading a byte, all 25 text-I/O sites name their encoding, and a
+  structural test fails if a new one forgets. Verified end to end under `LC_ALL=C`
+  with Japanese, accented Latin and emoji round-tripping intact.
 - **Renewing your lease handed your task to a competitor.** `created_at` is what
   the take resolver sorts on, earliest first, and every renewal rewrote it to
   now — so the agent actually doing the work renewed, their start time jumped

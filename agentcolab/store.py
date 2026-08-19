@@ -396,14 +396,14 @@ class Store:
                 except OSError:
                     break
                 time.sleep(0.2)
-            path.write_text(str(os.getpid()))
+            path.write_text(str(os.getpid()), encoding="utf-8")
             try:
                 yield
             finally:
                 with contextlib.suppress(OSError):
                     path.unlink()
             return
-        handle = open(path, "w")
+        handle = open(path, "w", encoding="utf-8")
         deadline = time.time() + timeout
         try:
             while True:
@@ -937,7 +937,7 @@ def _newer(a: dict[str, Any], b: dict[str, Any]) -> bool:
 
 def read_json(path: Path) -> Any:
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 
@@ -945,5 +945,5 @@ def read_json(path: Path) -> Any:
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)

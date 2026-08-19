@@ -6,6 +6,7 @@ from a PreToolUse hook that fires on every edit. Everything is stdlib.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import hmac
@@ -31,6 +32,27 @@ def now() -> datetime:
 
 def iso(dt: datetime | None = None) -> str:
     return (dt or now()).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def force_utf8() -> None:
+    """Make this process read and write UTF-8 whatever the locale says.
+
+    Python on Windows defaults its standard streams to the ANSI codepage rather
+    than UTF-8, and every record here is JSON that can carry any agent's name,
+    any commit subject, any message body. The first non-ASCII byte therefore
+    killed the MCP server outright -- it dies decoding its own transport -- and
+    silently turned every hook into a no-op, since hooks suppress exceptions and
+    an invisible failure is the worst kind.
+
+    Called from each entry point rather than left to the environment: PYTHONUTF8
+    is not something a user of this tool should have to know about.
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        with contextlib.suppress(Exception):
+            reconfigure(encoding="utf-8", errors="replace")
 
 
 def parse_iso(value: str | None) -> datetime | None:
@@ -462,7 +484,7 @@ def env_key_shape(repo_root: Path, files: Sequence[str] = ENV_FILES,
         if not path.is_file():
             continue
         try:
-            text = path.read_text(errors="ignore")
+            text = path.read_text(errors="ignore", encoding="utf-8")
         except OSError:
             continue
         for line in text.splitlines():
@@ -713,7 +735,7 @@ def usage_by_day(repo_root: Path, days: int = 7) -> dict[str, dict[str, Any]]:
         for path in project.rglob("*.jsonl"):
             sub = "subagents" in path.parts or "workflows" in path.parts
             try:
-                with path.open(errors="ignore") as handle:
+                with path.open(errors="ignore", encoding="utf-8") as handle:
                     for line in handle:
                         if '"usage"' not in line:
                             continue

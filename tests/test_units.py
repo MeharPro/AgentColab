@@ -332,6 +332,58 @@ class Attribution(unittest.TestCase):
         self.assertEqual(got["agent"], "victoria")
 
 
+class TextEncoding(unittest.TestCase):
+    """Every byte this tool reads or writes is UTF-8, whatever the locale says.
+
+    Python on Windows defaults to the ANSI codepage, so the first non-ASCII
+    character in a name, a commit subject or a message body killed the MCP
+    server outright and turned every hook into a silent no-op.
+    """
+
+    def test_no_text_file_is_opened_without_an_encoding(self):
+        import ast
+        offenders = []
+        root = Path(__file__).resolve().parent.parent / "agentcolab"
+        for path in sorted(root.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+                if name not in ("read_text", "write_text", "open"):
+                    continue
+                if any(k.arg == "encoding" for k in node.keywords):
+                    continue
+                mode = ""
+                if name == "open":
+                    if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+                        mode = str(node.args[1].value)
+                    for k in node.keywords:
+                        if k.arg == "mode" and isinstance(k.value, ast.Constant):
+                            mode = str(k.value.value)
+                    if "b" in mode:
+                        continue
+                offenders.append(f"{path.name}:{node.lineno} {name}()")
+        self.assertEqual(offenders, [],
+                         "text I/O without an explicit encoding falls back to the locale")
+
+    def test_the_entry_point_forces_utf8_before_anything_else(self):
+        source = (Path(__file__).resolve().parent.parent
+                  / "agentcolab" / "cli.py").read_text(encoding="utf-8")
+        body = source[source.index("def main("):]
+        body = body[:body.index("argv = list(")]
+        self.assertIn("force_utf8()", body,
+                      "main() reads argv before fixing the stream encodings")
+
+    def test_force_utf8_survives_a_stream_that_cannot_reconfigure(self):
+        import io
+        real = sys.stdout
+        try:
+            sys.stdout = io.StringIO()      # no reconfigure attribute
+            records.force_utf8()            # must not raise
+        finally:
+            sys.stdout = real
+
+
 class Timestamps(unittest.TestCase):
     """Timestamps arrive from peers, so parsing must never hand back a naive one."""
 

@@ -507,7 +507,7 @@ def uninstall(store: Store) -> list[str]:
     settings_path = root / ".claude" / "settings.json"
     if settings_path.is_file():
         try:
-            settings = json.loads(settings_path.read_text())
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
         except ValueError:
             settings = {}
         changed = False
@@ -519,15 +519,15 @@ def uninstall(store: Store) -> list[str]:
         if (settings.get("mcpServers") or {}).pop("colab", None) is not None:
             changed = True
         if changed:
-            settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+            settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
             touched.append(str(settings_path.relative_to(root)))
     for name in ("AGENTS.md", "CONVENTIONS.md"):
         path = root / name
-        if path.is_file() and "<!-- agentcolab:start -->" in path.read_text():
-            text = path.read_text()
+        if path.is_file() and "<!-- agentcolab:start -->" in path.read_text(encoding="utf-8"):
+            text = path.read_text(encoding="utf-8")
             head, _, rest = text.partition("<!-- agentcolab:start -->")
             _, _, tail = rest.partition("<!-- agentcolab:end -->")
-            path.write_text((head + tail).strip() + "\n")
+            path.write_text((head + tail).strip() + "\n", encoding="utf-8")
             touched.append(name)
     rule = root / ".cursor" / "rules" / "colab.mdc"
     if rule.is_file():
@@ -542,7 +542,7 @@ def _install_claude(root: Path, force: bool) -> list[str]:
     settings: dict[str, Any] = {}
     if settings_path.is_file():
         try:
-            settings = json.loads(settings_path.read_text())
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
         except ValueError:
             return [f"skipped {settings_path} — not valid JSON, fix it first"]
 
@@ -563,7 +563,7 @@ def _install_claude(root: Path, force: bool) -> list[str]:
 
     if changed:
         settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
         out.append(f"wrote {settings_path.relative_to(root)}")
         out.append("  SessionStart      brief on peers, claims, your inbox")
         out.append("  UserPromptSubmit  re-brief only when something changed")
@@ -576,7 +576,7 @@ def _install_claude(root: Path, force: bool) -> list[str]:
     skill = root / ".claude" / "skills" / "colab" / "SKILL.md"
     if not skill.is_file() or force:
         skill.parent.mkdir(parents=True, exist_ok=True)
-        skill.write_text(_SKILL)
+        skill.write_text(_SKILL, encoding="utf-8")
         out.append(f"wrote {skill.relative_to(root)}")
     return out
 
@@ -584,7 +584,7 @@ def _install_claude(root: Path, force: bool) -> list[str]:
 def _install_agents_md(root: Path, force: bool, filename: str = "AGENTS.md") -> list[str]:
     """The convention every non-Claude harness reads. Idempotent by marker."""
     path = root / filename
-    text = path.read_text() if path.is_file() else ""
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
     if "<!-- agentcolab:start -->" in text:
         if not force:
             return [f"{filename} already has the colab section"]
@@ -592,7 +592,7 @@ def _install_agents_md(root: Path, force: bool, filename: str = "AGENTS.md") -> 
         _, _, tail = rest.partition("<!-- agentcolab:end -->")
         text = head + tail
     joined = (text.rstrip() + "\n\n" + AGENT_BLOCK) if text.strip() else AGENT_BLOCK
-    path.write_text(joined)
+    path.write_text(joined, encoding="utf-8")
     return [f"wrote {filename}"]
 
 
@@ -606,7 +606,7 @@ def _install_cursor(root: Path, force: bool) -> list[str]:
         return ["Cursor rule already present"]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("---\ndescription: Coordinate with other agents on this repo\n"
-                    "alwaysApply: true\n---\n\n" + AGENT_BLOCK)
+                    "alwaysApply: true\n---\n\n" + AGENT_BLOCK, encoding="utf-8")
     return [f"wrote {path.relative_to(root)}"]
 
 
@@ -615,7 +615,7 @@ def _install_opencode(root: Path, force: bool) -> list[str]:
     config: dict[str, Any] = {}
     if path.is_file():
         try:
-            config = json.loads(path.read_text())
+            config = json.loads(path.read_text(encoding="utf-8"))
         except ValueError:
             return ["skipped opencode.json — not valid JSON"]
     servers = config.setdefault("mcp", {})
@@ -623,7 +623,7 @@ def _install_opencode(root: Path, force: bool) -> list[str]:
         return ["opencode already wired"]
     servers["colab"] = {"type": "local", "command": ["colab", "mcp"], "enabled": True}
     config.setdefault("$schema", "https://opencode.ai/config.json")
-    path.write_text(json.dumps(config, indent=2) + "\n")
+    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     return [f"wrote {path.relative_to(root)}"]
 
 
