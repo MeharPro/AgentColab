@@ -381,6 +381,47 @@ class EventContract(unittest.TestCase):
         self.assertEqual(offenders, [], "Event called with an argument it does not accept")
 
 
+class MCPArgumentContract(unittest.TestCase):
+    """Every MCP tool must pass what its command actually reads.
+
+    `colab_next` and `colab_bug` both shipped broken this way: a flag was added
+    to the CLI and mcp.py was not updated, so the tool raised AttributeError,
+    which `_capture` swallowed into a bland "(no output, exit 1)". The tool
+    reported failure without ever saying why, on every single call.
+
+    Checked structurally so the next added flag fails here rather than silently
+    disabling a tool.
+    """
+
+    def test_every_tool_provides_the_arguments_its_command_reads(self):
+        import ast
+        import inspect
+        import re
+        from agentcolab import cli
+        source = (Path(__file__).resolve().parent.parent / "agentcolab" / "mcp.py").read_text()
+        problems = []
+        for node in ast.walk(ast.parse(source)):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_capture"):
+                continue
+            if len(node.args) < 3 or not isinstance(node.args[0], ast.Attribute):
+                continue
+            fn = node.args[0].attr
+            ns = node.args[2]
+            if not (isinstance(ns, ast.Call) and getattr(ns.func, "id", "") == "_ns"):
+                continue
+            provided = {kw.arg for kw in ns.keywords}
+            handler = getattr(cli, fn, None)
+            if handler is None:
+                problems.append(f"mcp calls cli.{fn}, which does not exist")
+                continue
+            used = set(re.findall(r"args\.(\w+)", inspect.getsource(handler)))
+            missing = used - provided
+            if missing:
+                problems.append(f"{fn} reads args.{{{', '.join(sorted(missing))}}} "
+                                f"but the tool never provides them")
+        self.assertEqual(problems, [])
+
+
 class CustomChannels(unittest.TestCase):
     """A project inventing its own rooms is configuration, not a code change."""
 

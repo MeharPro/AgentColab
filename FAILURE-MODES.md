@@ -171,6 +171,29 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **A record path from a shared ref could escape its directory.** `_owner_of`
+  parsed `msgs/alice/../../../../.ssh/authorized_keys` as owned by "alice", and
+  an agent of that name would then adopt it out of its own record directory —
+  an arbitrary file write driven by anyone who can push to the ref. Every path
+  component is now validated as a plain name, and `adopt_own` re-checks the
+  resolved path stays inside `mine/`.
+- **`colab next` could deal one task to two agents after all.** The ready-task
+  ordering sorted by priority and timestamp only, and both tie constantly
+  because ids are minted in a loop inside the same second. A tie left to input
+  order means two machines sort the list differently and the deal diverges. The
+  id is now the final sort key, and the ordering lives in `board.ready_order`
+  so tests exercise the real thing — an earlier test re-implemented the sort and
+  therefore passed under every mutation of it.
+- **`can_push` never contacted the remote.** It dry-ran a push of
+  `refs/agentcolab/state`, which on any machine that had never published fails
+  locally with "src refspec does not match any" — and that error was read as
+  success. So `join` would select a remote the user cannot write to. It probes
+  with `HEAD` now, which always exists.
+- **Two MCP tools crashed on every call and reported nothing.** `colab_next` and
+  `colab_bug` did not pass arguments their commands had gained, so they raised
+  AttributeError, which `_capture` swallowed into "(no output, exit 1)". A
+  structural test now checks every tool's arguments against what its command
+  reads.
 - **A signature proved that *somebody* trusted signed a record, not *who*.**
   Verification searched every known key and reported whoever owned the match,
   without checking that key belonged to the agent the record was attributed to.

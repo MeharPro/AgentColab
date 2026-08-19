@@ -156,6 +156,22 @@ def tasks(store: Store) -> dict[str, dict[str, Any]]:
     return board
 
 
+def ready_order(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The one canonical ordering of workable tasks.
+
+    Named and exported so it can be tested directly. A test that re-implements
+    this sort passes whatever the real one does, which is how a missing tie-break
+    survived review once already.
+
+    The id is the final key and it is not decoration: priority and timestamp tie
+    constantly, because ids are minted in a loop inside the same second. A tie
+    left to input order means two machines sort the list differently and deal()
+    hands the same task to two agents — which is the entire guarantee gone.
+    """
+    return sorted(tasks, key=lambda t: (PRIORITIES.get(str(t.get("priority")), 2),
+                                        str(t.get("created_at")), str(t.get("id"))))
+
+
 def _expired(take: dict[str, Any]) -> bool:
     stamp = parse_iso(take.get("expires_at"))
     return bool(stamp and stamp < now())
@@ -186,9 +202,7 @@ def open_tasks(store: Store) -> list[dict[str, Any]]:
                for dep in task.get("deps") or []):
             continue
         ready.append(task)
-    ready.sort(key=lambda t: (PRIORITIES.get(str(t.get("priority")), 2),
-                             str(t.get("created_at"))))
-    return ready
+    return ready_order(ready)
 
 
 def deal(ready: list[dict[str, Any]], roster: list[str]) -> dict[str, dict[str, Any]]:

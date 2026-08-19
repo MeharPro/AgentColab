@@ -164,13 +164,22 @@ def home_dir(project: str) -> Path:
 
 
 def can_push(root: Path, remote: str, timeout: int = 20) -> bool:
-    """Ask the remote, do not guess. Advertises refs without writing anything."""
+    """Ask the remote, do not guess. Advertises refs without writing anything.
+
+    The source has to be a ref that exists locally. Using `refs/agentcolab/state`
+    meant that on any machine which had never published, git failed with
+    "src refspec does not match any" *before contacting the remote at all* — and
+    that error was then read as success, so `join` happily selected a remote the
+    user could not write. HEAD always exists in a repository with a commit.
+    """
     proc = git(["push", "--dry-run", "--porcelain", remote,
-                f"{STATE_REF}:{STATE_REF}"], cwd=root, check=False, timeout=timeout)
+                f"HEAD:{STATE_REF}-access-probe"],
+               cwd=root, check=False, timeout=timeout)
     if proc.returncode == 0:
         return True
-    text = (proc.stderr or b"").decode(errors="ignore").lower()
-    # "src refspec does not match any" means we may push but have nothing yet.
+    text = ((proc.stderr or b"") + (proc.stdout or b"")).decode(errors="ignore").lower()
+    # A repository with no commits yet has no HEAD to offer; that is not a
+    # permission answer, so fall back to assuming we may write.
     return "does not match any" in text or "src refspec" in text
 
 
@@ -505,12 +514,22 @@ class Store:
 
     @staticmethod
     def _owner_of(path: str) -> str:
-        """`msgs/<agent>/<id>.json` and `agents/<agent>.json` both name an owner."""
+        """`msgs/<agent>/<id>.json` and `agents/<agent>.json` both name an owner.
+
+        Every component is validated, because this function decides where a
+        record read off a shared ref gets written on disk. A path like
+        `msgs/alice/../../../../.ssh/authorized_keys` used to answer "alice",
+        and an agent of that name would then adopt it straight out of its own
+        record directory. Anything that is not a plain name answers "", which
+        makes it unowned and therefore never written.
+        """
         parts = path.split("/")
-        if len(parts) >= 3 and parts[0] in KINDS:
+        if not all(_plain_name(part) for part in parts):
+            return ""
+        if len(parts) == 3 and parts[0] in KINDS and parts[2].endswith(".json"):
             return parts[1]
-        if len(parts) == 2 and parts[0] == "agents":
-            return parts[1].removesuffix(".json")
+        if len(parts) == 2 and parts[0] == "agents" and parts[1].endswith(".json"):
+            return parts[1][:-len(".json")]
         return ""
 
     def view(self, *, refresh: bool = False) -> dict[str, dict[str, Any]]:
@@ -645,6 +664,12 @@ class Store:
         for source in self.sources():
             for path, data in self._tree_records(self._source_ref(source["name"])).items():
                 if self._owner_of(path) != self.agent:
+                    continue
+                # Belt and braces: _owner_of already rejects anything that is not
+                # a plain name, but this is the one place a remote-controlled
+                # string becomes a filesystem path, so it is checked again here.
+                target = (self.mine / path).resolve()
+                if not str(target).startswith(str(self.mine.resolve()) + os.sep):
                     continue
                 if (self.mine / path).exists():
                     continue
@@ -831,6 +856,17 @@ class Store:
 
     def destroy(self) -> None:
         shutil.rmtree(self.home, ignore_errors=True)
+
+
+def _plain_name(part: str) -> str:
+    """A single path component that cannot escape its directory."""
+    if not part or part in (".", ".."):
+        return ""
+    if "/" in part or "\\" in part or part.startswith("-"):
+        return ""
+    if any(ch in part for ch in "\x00:*?\"<>|"):
+        return ""
+    return part
 
 
 def _newer(a: dict[str, Any], b: dict[str, Any]) -> bool:

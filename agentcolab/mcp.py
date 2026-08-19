@@ -162,7 +162,7 @@ def call(store: Store, name: str, arguments: dict[str, Any]) -> str:
     if name == "colab_status":
         return _capture(cli.cmd_status, store, _ns(offline=False, sync=True, limit=10))
     if name == "colab_next":
-        return _capture(cli.cmd_next, store, _ns(take=bool(get("take"))))
+        return _capture(cli.cmd_next, store, _ns(take=bool(get("take")), offline=False))
     if name == "colab_board":
         return _capture(cli.cmd_board, store, _ns(limit=25, json=False))
     if name == "colab_task":
@@ -214,7 +214,7 @@ def call(store: Store, name: str, arguments: dict[str, Any]) -> str:
     if name == "colab_bug":
         return _capture(cli.cmd_bug, store, _ns(
             title=[str(get("title") or "")], body=str(get("body") or ""),
-            paths=[], capture=None))
+            paths=[], capture=None, fresh=False))
     if name == "colab_sync":
         return _capture(cli.cmd_sync, store, _ns(intent=None, quiet=False))
     return f"unknown tool {name!r}"

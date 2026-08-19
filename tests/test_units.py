@@ -238,6 +238,61 @@ class DeterministicOwnership(unittest.TestCase):
         self.assertEqual(board.resolve_take(holders)["agent"], "amy")
 
 
+class RecordPaths(unittest.TestCase):
+    """`_owner_of` decides where a record from a shared ref lands on disk."""
+
+    def test_traversal_is_not_owned_by_anyone(self):
+        from agentcolab.store import Store
+        for evil in ("msgs/alice/../../../../.ssh/authorized_keys",
+                     "msgs/../alice/x.json",
+                     "msgs/alice/..%2f..%2fx.json/../x.json",
+                     "agents/../../x.json",
+                     "msgs//alice/x.json",
+                     "msgs/alice/sub/dir/x.json",
+                     "/etc/passwd",
+                     "msgs/-rf/x.json"):
+            with self.subTest(path=evil):
+                self.assertEqual(Store._owner_of(evil), "",
+                                 "a non-plain path was treated as owned, so it would be written")
+
+    def test_ordinary_paths_still_resolve(self):
+        from agentcolab.store import Store
+        self.assertEqual(Store._owner_of("msgs/alice/m-1.json"), "alice")
+        self.assertEqual(Store._owner_of("agents/alice.json"), "alice")
+        self.assertEqual(Store._owner_of("tasks/fable-arch/t-1.json"), "fable-arch")
+
+
+class DealDeterminism(unittest.TestCase):
+    """Ties are the normal case, not the edge case: ids are minted in a loop."""
+
+    def _ready(self):
+        return [{"id": f"t-{n}", "priority": "p1", "created_at": "2026-01-01T00:00:00Z"}
+                for n in ("zzz", "aaa", "mmm", "kkk", "bbb", "ppp")]
+
+    def _order(self, tasks):
+        # The real function, not a copy of it. Re-implementing the sort here is
+        # how the missing tie-break survived a mutation test: the assertion
+        # passed whatever board did, because it never called board.
+        return board.ready_order(tasks)
+
+    def test_a_fully_tied_task_set_still_deals_identically_everywhere(self):
+        import random
+        roster = ["alice", "bob", "carol"]
+        seen = set()
+        for _ in range(200):
+            shuffled = self._ready()
+            random.shuffle(shuffled)
+            got = board.deal(self._order(shuffled), roster)
+            seen.add(tuple(sorted((k, v["id"]) for k, v in got.items())))
+        self.assertEqual(len(seen), 1,
+                         "the deal varied with input order, so two machines disagree")
+
+    def test_and_the_result_is_still_distinct(self):
+        got = board.deal(self._order(self._ready()), ["alice", "bob", "carol"])
+        picks = [v["id"] for v in got.values()]
+        self.assertEqual(len(picks), len(set(picks)))
+
+
 class Trust(unittest.TestCase):
     def test_canonical_ignores_read_time_metadata(self):
         signed = {"agent": "alice", "intent": "x"}
