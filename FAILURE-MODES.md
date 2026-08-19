@@ -171,6 +171,14 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **A channel nobody had provisioned swallowed its messages into `#link`.** A
+  project could define `bs-chat`, and `colab say bs-chat "..."` would report
+  success while the message landed somewhere else entirely — the feature quietly
+  not working, which is worse than it failing. The fallback stays (a message in
+  the wrong room beats a lost one) but it is now reported, with the command that
+  fixes it. And "chat is not configured" no longer prints when chat *is*
+  configured and the post simply failed, which sent people to fix the one part
+  that was already right.
 - **An MCP tool argument of `"-"` consumed the JSON-RPC transport.** The CLI
   reads a bare `-` as "take the body from stdin", which is right in a terminal
   and catastrophic in the MCP server, whose stdin *is* the protocol stream — the

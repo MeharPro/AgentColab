@@ -249,7 +249,7 @@ def find_message(store: Store, needle: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------- chat bridge
 
 
-def mirror(store: Store, kind: str, subject: str, *, body: str = "",
+def mirror(store: Store, kind: str, subject: str, *, body: str = "",  # noqa: D401
            fields: dict[str, Any] | None = None, channel: str = "link",
            wire_line: str = "", url: str = "") -> int:
     """Best-effort copy to every chat platform. Never allowed to fail a command."""
@@ -260,9 +260,17 @@ def mirror(store: Store, kind: str, subject: str, *, body: str = "",
         event = chat.Event(kind, store.agent, subject, body=body, fields=fields or {},
                            channel=channel, wire=wire_line, url=url,
                            trust=str(config.get("trust") or "unverified"))
-        return chat.post(config, event)
+        sent = chat.post(config, event)
+        # Remember where the last post actually landed so a command can report a
+        # silent redirect rather than claiming a channel it never reached.
+        mirror.last_landed = list(event.landed)
+        return sent
     except Exception:
+        mirror.last_landed = []
         return 0
+
+
+mirror.last_landed = []          # type: ignore[attr-defined]
 
 
 def pull_chat(store: Store, timeout: int = 8) -> int:

@@ -285,6 +285,20 @@ class ChatAdapters(unittest.TestCase):
         self.assertFalse(perms & discord.Discord.PERM["MANAGE_CHANNELS"])
         self.assertFalse(perms & discord.Discord.PERM["MANAGE_WEBHOOKS"])
 
+    def test_post_records_where_a_message_actually_landed(self):
+        # Needs the fake server: the point is a *successful* post to a channel
+        # the caller did not name.
+        from agentcolab import chat as chatmod
+        config = {"chat": {"drivers": ["discord"],
+                           "custom": {"bs-chat": {"purpose": "blunt"}},
+                           "discord": {"token": "t",
+                                       "channels": {"link": {"id": "100"}}}}}
+        event = base.Event("note", "alice", "blunt observation", channel="bs-chat")
+        sent = chatmod.post(config, event)
+        self.assertEqual(sent, 1, "the message did not go out at all")
+        self.assertEqual([w for _, w in event.landed], ["link"],
+                         "a silent redirect was not reported")
+
     def test_verify_distinguishes_a_bad_token_from_a_quiet_channel(self):
         ok, detail = self._discord(token="").verify()
         self.assertFalse(ok)
@@ -488,6 +502,18 @@ class CustomChannels(unittest.TestCase):
         self.assertEqual(got["link"]["dir"], "out")
         self.assertIn("keep it short", got["link"]["brief"])
         self.assertIn("Agent-to-agent", got["link"]["purpose"])
+
+    def test_an_unprovisioned_channel_falls_back_but_says_so(self):
+        # Falling back beats dropping the message. Falling back *silently* means
+        # `colab say bs-chat "..."` reports success while posting to #link, which
+        # is the feature quietly not working.
+        adapter = discord.Discord({"token": "t", "custom": self.CONF["chat"]["custom"],
+                                   "channels": {"link": {"id": "100"}}})
+        entry, landed = adapter.resolve_route("bs-chat")
+        self.assertEqual(landed, "link", "should fall back rather than drop")
+        self.assertNotEqual(landed, "bs-chat")
+        entry, landed = adapter.resolve_route("link")
+        self.assertEqual(landed, "link")
 
     def test_adapters_can_route_and_provision_a_custom_channel(self):
         adapter = discord.Discord({"token": "t", "custom": self.CONF["chat"]["custom"],

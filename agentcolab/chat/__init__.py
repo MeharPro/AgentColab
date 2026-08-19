@@ -51,14 +51,22 @@ def enabled(config: dict[str, Any]) -> bool:
 
 
 def post(config: dict[str, Any], event: Event) -> int:
-    """Mirror one event everywhere. Never raises: a mirror must not fail a command."""
+    """Mirror one event everywhere. Never raises: a mirror must not fail a command.
+
+    Records on the event where each platform actually delivered it, so a caller
+    can tell the user when a channel they named was not configured and the
+    message went to the default room instead.
+    """
     sent = 0
+    event.landed = []
     for adapter in adapters(config):
         if not adapter.can_write():
             continue
+        _, landed = adapter.resolve_route(event.channel)
         with contextlib.suppress(Exception):
             if adapter.post(event):
                 sent += 1
+                event.landed.append((adapter.name, landed))
         # The firehose gets everything; a channel that also routes elsewhere is
         # posted twice on purpose, because muting the firehose is the point.
         if event.channel != "firehose" and (adapter.config.get("channels") or {}).get("firehose"):

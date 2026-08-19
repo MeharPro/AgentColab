@@ -1544,8 +1544,23 @@ def cmd_say(store: Store, args: argparse.Namespace) -> int:
                           channel=name)
     session.charge(store, records.estimate_tokens(body), f"say:{name}")
     if not sent:
-        eprint(f"colab: chat is not configured, so nothing was posted. `colab chat status`")
+        if not chat.enabled(store.config()):
+            eprint("colab: chat is not configured on this machine, so nothing was posted.")
+            eprint("     Set it up with `colab chat setup discord`, or leave it off — "
+                   "everything else works without it.")
+        else:
+            # Configured but the post failed: a wrong token, a channel the bot
+            # cannot see, or the platform being down. Saying "not configured"
+            # here sends people to fix the one thing that is already right.
+            eprint("colab: chat is configured but the message did not go out.")
+            eprint("     `colab chat status` says which part is failing.")
         return 1
+    landed = getattr(session.mirror, "last_landed", []) or []
+    elsewhere = sorted({where for _, where in landed if where != name})
+    if elsewhere:
+        return _ok(f"posted to #{', #'.join(elsewhere)} — NOT #{name}.\n"
+                   f"  #{name} is defined but has no channel on the platform yet, so it "
+                   f"fell back.\n  Create it:  colab chat provision")
     return _ok(f"posted to #{name}")
 
 

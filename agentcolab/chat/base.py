@@ -139,6 +139,8 @@ class Event:
         self.wire = wire
         self.url = url
         self.trust = trust
+        # Filled in by chat.post: [(platform, channel actually delivered to)].
+        self.landed: list[tuple[str, str]] = []
 
     def badge(self) -> str:
         """Trust is rendered in the room, not just enforced in the code.
@@ -207,18 +209,23 @@ class Adapter:
         """Every channel this adapter knows, built-in and project-defined."""
         return resolve({"chat": {"custom": self.config.get("custom") or {}}})
 
-    def route(self, channel: str) -> dict[str, Any]:
-        """Resolve a logical channel, falling back rather than dropping.
+    def resolve_route(self, channel: str) -> tuple[dict[str, Any], str]:
+        """(destination, where it actually landed).
 
-        An unknown or unconfigured channel must never make a message vanish —
-        it lands in the default room instead, where somebody will see it and
-        fix the mapping.
+        Falling back rather than dropping is right — a message that vanishes is
+        worse than one in the wrong room. Falling back *silently* is not: a
+        project defines `bs-chat`, never provisions it, and every post lands in
+        `link` while the command reports success. So the caller is told where it
+        really went and can say so.
         """
         table = self.config.get("channels") or {}
         if channel in table:
-            return table[channel]
-        default = self.config.get("default") or "link"
-        return table.get(default) or {}
+            return table[channel], channel
+        default = str(self.config.get("default") or "link")
+        return (table.get(default) or {}), default
+
+    def route(self, channel: str) -> dict[str, Any]:
+        return self.resolve_route(channel)[0]
 
 
 def normalise_incoming(*, platform: str, message_id: str, author: str,
