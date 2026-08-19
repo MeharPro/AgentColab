@@ -171,6 +171,13 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **I shipped a red commit because my own check could not tell red from green.**
+  I verified suites with `grep -E "^OK|Ran "`, and a failing run still prints
+  `Ran 39 tests`, so a `FAILED` read exactly like a pass. One commit went out
+  with a broken MCP tool contract and CI caught what I had not. There is a
+  `tests/run_all.sh` now that runs every suite and returns one exit code, so
+  the answer is a number rather than something I have to read carefully at the
+  end of a long session.
 - **A custom input channel was created and then never read.** `_read_ids`
   hardcoded `("ask",)`, so a project could declare a `dir: "in"` channel, watch
   `chat provision` create it, and never receive a word from it. The underlying

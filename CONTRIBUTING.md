@@ -81,3 +81,14 @@ what to do next.
 Bugs and features: [issues](https://github.com/MeharPro/AgentColab/issues).
 Vulnerabilities: [security advisory](https://github.com/MeharPro/AgentColab/security/advisories/new),
 not a public issue. A scrubber bypass is the highest-severity class here.
+
+## Before you commit
+
+```bash
+bash tests/run_all.sh
+```
+
+One exit code for every suite. This exists because a commit once went out red:
+the check at the time grepped for `Ran ` and `^OK`, and a failing run prints
+`Ran 42 tests` just as happily as a passing one, so `FAILED` read as a pass.
+Trust the exit code, not the shape of the output.
