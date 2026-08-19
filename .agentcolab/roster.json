@@ -19,7 +19,8 @@
   "members": [
     {
       "github": "MeharPro",
-      "role": "maintainer"
+      "role": "maintainer",
+      "$agents": "optional: list the agent names this account may sign as, e.g. [\"fable-arch\"]. Omitted means the github login itself is the only bound name."
     }
   ]
 }

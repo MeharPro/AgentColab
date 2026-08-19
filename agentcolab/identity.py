@@ -186,11 +186,49 @@ def sign(payload: dict[str, Any], repo_root: Path | None = None) -> dict[str, An
     return out
 
 
+def principals_for(owner: str, roster: dict[str, Any],
+                   pins: dict[str, Any] | None = None) -> set[str]:
+    """Which principals are allowed to sign as this agent.
+
+    This is the binding that makes a signature mean something. Without it,
+    verification only answers "did *a* key we know sign this", and any
+    participant holding a trusted key can publish a record attributed to
+    somebody else and have it render as verified.
+
+    Precedence: an explicit roster binding, then the key pinned for that name on
+    first sight. If neither exists the name is unclaimed, and first use pins it.
+    """
+    name = records.slug(str(owner))
+    out: set[str] = set()
+    for entry in (roster.get("members") or []):
+        if not isinstance(entry, dict):
+            continue
+        github = str(entry.get("github") or "")
+        agent = str(entry.get("agent") or "")
+        names = {records.slug(a) for a in (entry.get("agents") or []) if a}
+        if agent:
+            names.add(records.slug(agent))
+        if github and not names:
+            names.add(records.slug(github))
+        if name in names:
+            if github:
+                out.add(github)
+            if agent:
+                out.add(agent)
+    if not out and (pins or {}).get(name):
+        out.add(name)
+    return out
+
+
 def verify(payload: dict[str, Any], allowed: dict[str, list[str]]) -> tuple[bool, str]:
     """Check a record's signature against a principal -> [pubkeys] table.
 
     Returns (ok, principal). `allowed` maps a principal — a GitHub login, or an
     agent name for pinned local keys — to the public keys it may sign with.
+
+    Callers must pass only the principals permitted to sign as this record's
+    owner; see `principals_for`. Handing it the whole table answers a weaker
+    question than it appears to.
     """
     signature = payload.get("sig")
     pubkey = normalise_pubkey(str(payload.get("sig_by") or ""))
@@ -280,9 +318,19 @@ def pinned_keys(cache_dir: Path) -> dict[str, Any]:
     return _read_json(cache_dir / "pins.json") or {}
 
 
-def pin(cache_dir: Path, agent: str, pubkey: str) -> str:
-    """Record or check the key an agent signs with. Returns 'new'|'same'|'CHANGED'."""
+def pin(cache_dir: Path, agent: str, pubkey: str, payload: dict[str, Any] | None = None) -> str:
+    """Record or check the key an agent signs with. 'new'|'same'|'CHANGED'|'none'.
+
+    When a payload is given, the key is only pinned if that payload actually
+    verifies under it. Otherwise anyone could claim a name by publishing a
+    record carrying somebody else's public key in `sig_by`, and the pin — the
+    thing every later check is measured against — would be a lie from the start.
+    """
     key = normalise_pubkey(pubkey)
+    if payload is not None and key:
+        ok, _ = verify(payload, {records.slug(str(agent)): [key]})
+        if not ok:
+            return "none"
     name = records.slug(str(agent))
     if not key or not name:
         return "none"
@@ -334,14 +382,25 @@ def build_allowed(roster: dict[str, Any], cache_dir: Path, *,
 
 
 def classify(payload: dict[str, Any], roster: dict[str, Any],
-             allowed: dict[str, list[str]]) -> dict[str, Any]:
+             allowed: dict[str, list[str]],
+             cache_dir: Path | None = None) -> dict[str, Any]:
     """Attach `_trust` and `_verified` to a record read off the wire.
 
     Trust is a property of the *signature*, never of what the record claims
     about itself. An unsigned record that says `"role": "maintainer"` is
     `unverified`, and everything downstream renders it that way.
     """
-    ok, principal = verify(payload, allowed)
+    # Restrict to the keys permitted to sign as this record's owner. Verifying
+    # against every known key would confirm only that somebody we trust signed
+    # it -- not that they are who the record says they are.
+    owner = str(payload.get("agent") or "")
+    permitted = principals_for(owner, roster, pinned_keys(cache_dir) if cache_dir else None)
+    scoped = {who: keys for who, keys in (allowed or {}).items() if who in permitted}
+    if owner and not scoped:
+        # Unclaimed name: nothing has bound it yet, so nothing can be proven
+        # about it. First use pins it (see session.pin_peers).
+        scoped = {}
+    ok, principal = verify(payload, scoped)
     out = dict(payload)
     out["_verified"] = bool(ok)
     out["_principal"] = principal if ok else ""

@@ -139,7 +139,7 @@ def allowed_keys(store: Store, *, online: bool = True) -> dict[str, list[str]]:
 def classify_all(store: Store, items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     allowed = allowed_keys(store, online=False)
     ros = roster(store)
-    return [identity.classify(item, ros, allowed) for item in items]
+    return [identity.classify(item, ros, allowed, store.shared) for item in items]
 
 
 def pin_peers(store: Store) -> list[str]:
@@ -154,7 +154,10 @@ def pin_peers(store: Store) -> list[str]:
         key = str(peer.get("sig_by") or "")
         if not (name and key) or name == store.agent:
             continue
-        result = identity.pin(store.shared, name, key)
+        # Pass the record: a key is only pinned if it actually signed this,
+        # which proves possession. Without that, publishing a record carrying
+        # somebody else's public key would claim their name.
+        result = identity.pin(store.shared, name, key, peer)
         if result == "CHANGED":
             warnings.append(
                 f"{name} is now signing with a DIFFERENT key than the one first seen. "

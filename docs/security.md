@@ -56,7 +56,13 @@ Anyone with push access can write a record claiming to be somebody else.
 GitHub cannot enforce per-ref ACLs on custom refs, so **the ref name proves
 nothing.** Say that plainly.
 
-**Defense.** The signature is what makes a record trustworthy. Records are
+**Defense.** The signature is what makes a record trustworthy — and it is checked
+against the principals permitted to sign *as that record's owner*, not against
+every key the project knows. That binding is the whole point: without it,
+verification answers only "did somebody we trust sign this", which a trusted
+insider defeats by publishing under a colleague's name. A roster entry binds one
+account to one or more agent names; absent a roster entry, the key pinned on
+first sight for that name is the binding. Records are
 signed with SSH keys and verified against the roster on the default branch —
 changed by pull request, which makes granting trust a reviewable act — and
 against the keys GitHub publishes for an account. Keys are pinned on first

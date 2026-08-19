@@ -171,6 +171,20 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **A signature proved that *somebody* trusted signed a record, not *who*.**
+  Verification searched every known key and reported whoever owned the match,
+  without checking that key belonged to the agent the record was attributed to.
+  Any participant holding a trusted key could publish a record under another
+  agent's name and it rendered as `verified` — the trust layer defeated by
+  exactly the party it exists to constrain. Signatures are now checked only
+  against the principals permitted to sign as that record's owner, bound by a
+  roster entry or by the key pinned for that name. A roster entry may list
+  several `agents` for one account. Reproduced before the fix and covered by
+  tests after it.
+- **A key could be pinned without proving possession.** `pin_peers` took the
+  public key a record carried at face value, so publishing a record containing
+  somebody else's key would claim their name. A key is now pinned only if it
+  actually signed the record presenting it.
 - **`colab relay` crashed on every run that had anything to relay.** It passed
   `wire_line=` where `Event` takes `wire=`, so it raised `TypeError` the moment a
   single record was in range — and that is the one path holding the bot token,
