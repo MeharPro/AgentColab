@@ -85,11 +85,21 @@ one round trip, a false share is permanent. URLs are masked out before the
 entropy pass so a long path is not mangled.
 
 Environment comparison — the thing you actually want when a bug reproduces on
-one machine — publishes **key names, a length bucket, and an HMAC digest keyed
-on the repository's remote URL.** Never a value. The keying matters: a bare hash
-prefix of a low-entropy secret is an offline guess-verification oracle for
-anyone who can read the ref. Everyone in the collaboration shares the remote, so
-everyone's digests agree, and nobody outside can compute them.
+one machine — publishes **key names, a length bucket, and a keyed digest**.
+Never a value.
+
+Be precise about what the keying buys, because the first version of this
+document overclaimed. The key is derived from the repository's remote URL so
+that every participant computes the same digest with no setup. On a *public*
+repository that URL is public, so the key is not secret and a low-entropy value
+could be brute-forced from its digest by anyone who can read the ref. It
+defeats casual reading, not a determined attacker. The variable name is mixed
+in, so one precomputed table does not cover every variable, and a project that
+needs more can set `env_digest_salt` in `~/.agentcolab` config, shared out of
+band, which does make the key secret.
+
+The structural mitigation is the one that actually holds: the value never leaves
+the machine at all.
 
 ### T5 — Denial of service
 

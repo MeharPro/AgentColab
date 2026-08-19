@@ -132,12 +132,18 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
      "[REDACTED:private-key]"),
     (re.compile(r"\b[0-9]{13,16}\b(?=\s*(?:exp|cvc|/|$))", re.I), "[REDACTED:card]"),
+    # `Basic <base64>` ends in '=' padding, which the general pattern below
+    # excluded, so an entire base64 credential survived untouched.
+    (re.compile(r"(?i)\b(basic|bearer|digest|negotiate)\s+[A-Za-z0-9+/._\-]{8,}={0,2}"),
+     r"\1 [REDACTED:auth-header]"),
     (re.compile(
         r"(?i)\b(authorization|bearer|token|api[-_]?key|x-api-key)\s*[:=]\s*"
-        r"[\"']?(?:bearer\s+)?[A-Za-z0-9._\-]{12,}"),
+        r"[\"']?(?:bearer\s+)?[A-Za-z0-9+/._\-]{12,}={0,2}"),
      "[REDACTED:auth-header]"),
     # postgres://user:password@host, mongodb+srv://..., redis://...
-    (re.compile(r"\b([a-z][a-z0-9+.\-]*://[^\s:/@]+):[^\s/@]+@"), r"\1:[REDACTED]@"),
+    # The username is optional: `postgres://:password@host` is valid and used,
+    # and requiring one character there published the password in full.
+    (re.compile(r"\b([a-z][a-z0-9+.\-]*://[^\s:/@]*):[^\s/@]+@"), r"\1:[REDACTED]@"),
     # KEY=value for anything that names itself a secret.
     (re.compile(
         r"\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|APIKEY|API_KEY|PRIVATE_KEY|CREDENTIAL)"
@@ -406,29 +412,41 @@ ENV_FILES: tuple[str, ...] = (
 )
 
 
-def _digest_key(repo_root: Path) -> bytes:
-    """A secret every participant derives identically and an outsider cannot.
+def _digest_key(repo_root: Path, salt: str = "") -> bytes:
+    """The key the env-shape digests are computed under.
 
-    Keyed on the repo's own remote URL: everyone in the collaboration shares it,
-    so digests agree, while a bare hash prefix of a low-entropy secret would be
-    an offline guess-verification oracle for anyone who can read the ref.
+    Honest about what this buys. It is derived from the repository's remote URL
+    so that every participant computes the same digest with no setup — but on a
+    public repository that URL is public, so the key is not a secret and a
+    low-entropy value could be brute-forced from its digest by anyone who can
+    read the ref. It stops casual reading, not a determined attacker.
+
+    Two things narrow that. The env key name is mixed in, so one rainbow table
+    does not cover every variable. And a project that actually cares can set
+    `env_digest_salt` in ~/.agentcolab config, shared out of band, which does
+    make the key secret.
+
+    The real mitigation remains structural: values are never published at all —
+    only a length bucket and this digest.
     """
     url = run(["git", "-C", str(repo_root), "remote", "get-url", "origin"], timeout=5)
-    return hashlib.sha256(f"agentcolab-env-shape::{url}".encode()).digest()
+    return hashlib.sha256(f"agentcolab-env-shape::{url}::{salt}".encode()).digest()
 
 
-def _keyed_digest(value: str, key: bytes) -> str:
-    return hmac.new(key, value.encode(), hashlib.sha256).hexdigest()[:8]
+def _keyed_digest(value: str, key: bytes, name: str = "") -> str:
+    """Per-variable, so one table of precomputed digests does not cover them all."""
+    return hmac.new(key, f"{name}\x1f{value}".encode(), hashlib.sha256).hexdigest()[:8]
 
 
-def env_key_shape(repo_root: Path, files: Sequence[str] = ENV_FILES) -> dict[str, str]:
+def env_key_shape(repo_root: Path, files: Sequence[str] = ENV_FILES,
+                  salt: str = "") -> dict[str, str]:
     """Which env keys exist here — names and value *shape* only, never values.
 
     'Only reproduces on my machine' is usually a .env that differs. Comparing
     key presence and a keyed digest finds that without publishing one secret.
     """
     shape: dict[str, str] = {}
-    digest_key = _digest_key(repo_root)
+    digest_key = _digest_key(repo_root, salt)
     for name in files:
         path = repo_root / name
         if not path.is_file():
@@ -454,7 +472,7 @@ def env_key_shape(repo_root: Path, files: Sequence[str] = ENV_FILES) -> dict[str
                 bucket = "medium"
             else:
                 bucket = "long"
-            digest = _keyed_digest(value, digest_key) if value else "------"
+            digest = _keyed_digest(value, digest_key, key) if value else "------"
             shape[key] = f"{bucket}:{digest}"
     return shape
 

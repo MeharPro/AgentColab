@@ -381,6 +381,35 @@ class EventContract(unittest.TestCase):
         self.assertEqual(offenders, [], "Event called with an argument it does not accept")
 
 
+class MCPTransportSafety(unittest.TestCase):
+    """A tool argument must never be able to consume the JSON-RPC transport.
+
+    The CLI reads a bare "-" as "take the body from stdin", which is correct in
+    a terminal and catastrophic in the MCP server, whose stdin *is* the
+    protocol stream. A tool called with body="-" would swallow whatever the
+    client sent next.
+    """
+
+    def test_a_dash_argument_is_neutralised(self):
+        from agentcolab import mcp
+        self.assertEqual(mcp._arg("-"), "")
+        self.assertEqual(mcp._arg(" - "), "")
+        self.assertEqual(mcp._arg(None), "")
+
+    def test_ordinary_values_are_untouched(self):
+        from agentcolab import mcp
+        for value in ("normal", "a-b", "--flag-like", "a - b"):
+            self.assertEqual(mcp._arg(value), value)
+
+    def test_no_tool_passes_a_raw_get_into_a_command(self):
+        # Every string argument must go through _arg, or the guard is decorative.
+        import re
+        source = (Path(__file__).resolve().parent.parent / "agentcolab" / "mcp.py").read_text()
+        call = source[source.index("def call("):source.index("# ---------------------------------------------------------------- server")]
+        raw = re.findall(r'str\(get\("(\w+)"\)', call)
+        self.assertEqual(raw, [], f"these bypass _arg: {raw}")
+
+
 class MCPArgumentContract(unittest.TestCase):
     """Every MCP tool must pass what its command actually reads.
 

@@ -97,6 +97,31 @@ class Scrubbing(unittest.TestCase):
         text = "see https://example.com/a/very/long/path/that/goes/on/forever/ok"
         self.assertEqual(records.withhold_secrets(text), text)
 
+    def test_basic_auth_headers_are_redacted(self):
+        # Base64 padding ('=') fell outside the general auth-header pattern, so
+        # an entire `Basic` credential survived untouched.
+        out = records.scrub("Authorization: Basic YWRtaW46aHVudGVyMg==")
+        self.assertNotIn("YWRtaW46aHVudGVyMg", out)
+
+    def test_a_connection_url_with_no_username_still_hides_its_password(self):
+        # `postgres://:pw@host` is valid and used; requiring one username
+        # character published the password in full.
+        out = records.scrub("postgres://:supersecretpw@db.example.com:5432/app")
+        self.assertNotIn("supersecretpw", out)
+        self.assertIn("db.example.com", out)
+
+    def test_a_pem_survives_neither_raw_nor_json_escaped(self):
+        raw = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\n-----END PRIVATE KEY-----"
+        self.assertNotIn("MIIEvQIBADANBgkq", records.scrub(raw))
+        escaped = raw.replace("\n", "\\n")
+        self.assertNotIn("MIIEvQIBADANBgkq", records.scrub(escaped))
+
+    def test_env_digests_differ_per_variable(self):
+        # One rainbow table must not cover every variable holding the same value.
+        key = records._digest_key(Path("."))
+        self.assertNotEqual(records._keyed_digest("hunter2", key, "STRIPE_KEY"),
+                            records._keyed_digest("hunter2", key, "GITHUB_TOKEN"))
+
     def test_scrub_is_idempotent(self):
         once = records.scrub(FAKE_CREDENTIALS["github"])
         self.assertEqual(records.scrub(once), once)

@@ -155,6 +155,19 @@ def _ns(**kwargs: Any) -> argparse.Namespace:
     return argparse.Namespace(**kwargs)
 
 
+def _arg(value: Any) -> str:
+    """One tool argument, made safe to hand to a CLI command.
+
+    The CLI treats a bare "-" as "read the body from stdin", which is right for
+    a terminal and catastrophic here: this server's stdin *is* the JSON-RPC
+    transport. A tool called with body="-" would consume the protocol stream as
+    though it were user text, hanging the session and swallowing whatever the
+    client sent next.
+    """
+    text = "" if value is None else str(value)
+    return "" if text.strip() == "-" else text
+
+
 def call(store: Store, name: str, arguments: dict[str, Any]) -> str:
     from . import cli
     get = arguments.get
@@ -167,27 +180,27 @@ def call(store: Store, name: str, arguments: dict[str, Any]) -> str:
         return _capture(cli.cmd_board, store, _ns(limit=25, json=False))
     if name == "colab_task":
         return _capture(cli.cmd_task, store, _ns(
-            title=[str(get("title") or "")], body=str(get("body") or ""),
-            paths=list(get("paths") or []), priority=str(get("priority") or "p2"),
-            size=str(get("size") or "m"), tag=[], dep=[]))
+            title=[_arg(get("title"))], body=_arg(get("body")),
+            paths=list(get("paths") or []), priority=(_arg(get("priority")) or "p2"),
+            size=(_arg(get("size")) or "m"), tag=[], dep=[]))
     if name == "colab_take":
         return _capture(cli.cmd_take, store, _ns(
-            id=str(get("id") or ""), lease=str(get("lease") or board.DEFAULT_LEASE),
+            id=_arg(get("id")), lease=(_arg(get("lease")) or board.DEFAULT_LEASE),
             note="", force=False))
     if name == "colab_done":
         return _capture(cli.cmd_done, store, _ns(
-            id=str(get("id") or ""), pr=str(get("pr") or ""), note=str(get("note") or "")))
+            id=_arg(get("id")), pr=_arg(get("pr")), note=_arg(get("note"))))
     if name == "colab_known":
         return _capture(cli.cmd_known, store, _ns(
-            about=str(get("about") or ""), full=True, limit=12))
+            about=_arg(get("about")), full=True, limit=12))
     if name == "colab_finding":
         return _capture(cli.cmd_finding, store, _ns(
-            title=[str(get("title") or "")], body=str(get("body") or ""),
+            title=[_arg(get("title"))], body=_arg(get("body")),
             paths=list(get("paths") or []), tag=[]))
     if name == "colab_send":
         return _capture(cli.cmd_send, store, _ns(
-            subject=[str(get("subject") or "")], body=str(get("body") or ""),
-            to=get("to"), kind=str(get("kind") or "note"),
+            subject=[_arg(get("subject"))], body=_arg(get("body")),
+            to=(_arg(get("to")) or None), kind=(_arg(get("kind")) or "note"),
             paths=list(get("paths") or []), task="", channel="link",
             needs_reply=bool(get("needs_reply")), reply_to="", force=False,
             allow_secrets=False))
@@ -195,25 +208,25 @@ def call(store: Store, name: str, arguments: dict[str, Any]) -> str:
         return _capture(cli.cmd_inbox, store, _ns(
             chat=bool(get("chat")), wire=True, limit=15))
     if name == "colab_read":
-        return _capture(cli.cmd_read, store, _ns(id=str(get("id") or "")))
+        return _capture(cli.cmd_read, store, _ns(id=_arg(get("id"))))
     if name == "colab_answer":
         return _capture(cli.cmd_answer, store, _ns(
-            id=str(get("id") or ""), text=[str(get("text") or "")], channel=None))
+            id=_arg(get("id")), text=[_arg(get("text"))], channel=None))
     if name == "colab_claim":
         return _capture(cli.cmd_claim, store, _ns(
-            paths=list(get("paths") or []), reason=str(get("reason") or ""),
-            ttl=str(get("ttl") or cli.DEFAULT_TTL), critical=bool(get("critical")),
+            paths=list(get("paths") or []), reason=_arg(get("reason")),
+            ttl=(_arg(get("ttl")) or cli.DEFAULT_TTL), critical=bool(get("critical")),
             override=False))
     if name == "colab_release":
         return _capture(cli.cmd_release, store, _ns(id=None, all=True))
     if name == "colab_check":
-        return _capture(cli.cmd_check, store, _ns(path=str(get("path") or "")))
+        return _capture(cli.cmd_check, store, _ns(path=_arg(get("path"))))
     if name == "colab_preflight":
         return _capture(cli.cmd_preflight, store, _ns(
-            base=str(get("base") or "main"), no_fetch=False))
+            base=(_arg(get("base")) or "main"), no_fetch=False))
     if name == "colab_bug":
         return _capture(cli.cmd_bug, store, _ns(
-            title=[str(get("title") or "")], body=str(get("body") or ""),
+            title=[_arg(get("title"))], body=_arg(get("body")),
             paths=[], capture=None, fresh=False))
     if name == "colab_sync":
         return _capture(cli.cmd_sync, store, _ns(intent=None, quiet=False))

@@ -171,6 +171,23 @@ These were real and are covered by regression tests now.
   are orphan snapshots under a lease now.
 - **`colab` answered from cache.** Showing a stale roster is how an agent starts
   work somebody picked up two minutes ago. It always fetches now.
+- **An MCP tool argument of `"-"` consumed the JSON-RPC transport.** The CLI
+  reads a bare `-` as "take the body from stdin", which is right in a terminal
+  and catastrophic in the MCP server, whose stdin *is* the protocol stream — the
+  server would swallow whatever the client sent next. Every tool argument is
+  neutralised now, checked both behaviourally and structurally so a new tool
+  cannot reintroduce it.
+- **Two credential shapes survived the scrubber.** `Authorization: Basic
+  <base64>` (the `=` padding fell outside the pattern) and connection URLs with
+  no username, `postgres://:password@host`, which published the password in
+  full.
+- **The env-shape digest key was weaker than its own docstring claimed.** It is
+  derived from the repository's remote URL, which is public for a public repo,
+  so a low-entropy value could be brute-forced from its digest. The claim that
+  "an outsider cannot" derive it was simply wrong. The key now mixes in the
+  variable name so one table does not cover every variable, an optional
+  `env_digest_salt` gives a project a real secret if it wants one, and the
+  docstring says what it actually buys. Values are still never published.
 - **A record path from a shared ref could escape its directory.** `_owner_of`
   parsed `msgs/alice/../../../../.ssh/authorized_keys` as owned by "alice", and
   an agent of that name would then adopt it out of its own record directory —
