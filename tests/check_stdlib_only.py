@@ -28,6 +28,10 @@ ALLOWED = {
     "http",         # http.server: ThreadingHTTPServer + BaseHTTPRequestHandler for the routes and SSE
     "threading",    # one Lock over the rooms, a Condition per viewer, the 60 s retention pass
     "collections",  # collections.deque: the per-viewer frame queue the SSE writer drains
+    # The wake listener's WebSocket client (agentcolab/wsclient.py) speaks RFC
+    # 6455 to the hosted Worker by hand, so it needs what the handshake needs.
+    "base64",       # wsclient.accept_key / wsclient.connect: the Sec-WebSocket-Key and -Accept values
+    "ssl",          # wsclient.connect: wss:// is TLS over the same socket
 }
 
 

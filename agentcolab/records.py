@@ -147,6 +147,10 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
                 r"[2-9abcdefghjkmnpqrstvwxyz]{2}\.[2-9abcdefghjkmnpqrstvwxyz]{24}\b"),
      "[REDACTED:canvas-join-code]"),
     (re.compile(r"\bat-[2-9abcdefghjkmnpqrstvwxyz]{32}\b"), "[REDACTED:canvas-token]"),
+    # The owner token (contract section 10.2) flips one machine's wake switches
+    # from a browser; it rides in the owner link, which is exactly the kind of
+    # thing that gets pasted into a message.
+    (re.compile(r"\bot-[2-9abcdefghjkmnpqrstvwxyz]{32}\b"), "[REDACTED:canvas-owner-token]"),
     (re.compile(r"\bvt-[2-9abcdefghjkmnpqrstvwxyz]{32}\b"), "[REDACTED:canvas-ticket]"),
     (re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{16,}"), "[REDACTED:anthropic-key]"),
     (re.compile(r"\bsk-proj-[A-Za-z0-9_\-]{16,}"), "[REDACTED:openai-key]"),

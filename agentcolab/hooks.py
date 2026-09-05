@@ -334,21 +334,20 @@ def userpromptsubmit(payload: dict[str, Any]) -> int:
     briefed = dict(local.get("briefed") or {})
     if briefed.get(sess) == signature:
         return 0
+    ledger = "coord"
     if session.canvas_only_delta(briefed.get(sess), signature):
-        # A viewer typed a role or an ask. That is worth a re-brief, but a room
-        # code is held by anyone with the link, so it must not be able to spend
-        # the agent's whole coordination budget: canvas-only re-briefs draw on
-        # their own hourly line, and when it is gone they wait for the next
-        # ordinary change rather than firing every prompt.
+        # A viewer typed a role or a message. That is worth a re-brief, but a
+        # room code is held by anyone with the link, so it must not be able to
+        # spend the agent's whole coordination budget: a canvas-only re-brief is
+        # charged to its own hourly line *instead of* the coordination ledger
+        # (`budgeted_briefing(ledger="canvas")`), and when that line is gone it
+        # waits for the next ordinary change rather than firing every prompt.
+        ledger = "canvas"
         if session.canvas_budget_left(store) <= 0:
             briefed[sess] = signature
             local["briefed"] = dict(list(briefed.items())[-8:])
             store.save_local(local)
             return 0
-        with contextlib.suppress(Exception):
-            role = session.canvas_role(store)
-            session.canvas_charge(store, records.estimate_tokens(
-                session.role_block(role) if role else "canvas ask"))
     if signature == "empty":
         # Nothing to say. Record that, so we do not recompute it every prompt.
         briefed[sess] = signature
@@ -359,7 +358,7 @@ def userpromptsubmit(payload: dict[str, Any]) -> int:
     # briefing has actually been produced and emitted -- marking first meant a
     # briefing that failed to build was never retried, and the agent silently
     # started work knowing nothing.
-    return _brief(store, "UserPromptSubmit", sess)
+    return _brief(store, "UserPromptSubmit", sess, ledger=ledger)
 
 
 def stop(payload: dict[str, Any]) -> int:
@@ -370,7 +369,11 @@ def stop(payload: dict[str, Any]) -> int:
     sess = str(payload.get("session_id") or "session")
     with contextlib.suppress(Exception):
         from . import canvas
-        canvas.write_idle_marker(store, sess)
+        # Gated like every other canvas call: a machine that never joined a
+        # room must not grow a `canvas/` directory of idle markers, one per
+        # session, that nothing ever removes.
+        if canvas.is_on(store):
+            canvas.write_idle_marker(store, sess)
     # Ahead of the 120-second throttle: presence can wait two minutes, a card
     # that says `working` while the agent is asleep cannot.
     _canvas_flush(store, payload, sess, budget=3)
@@ -474,11 +477,21 @@ def _flush_notices(store: Store) -> int:
     return len(pending)
 
 
-def _brief(store: Store, event: str, sess: str) -> int:
+def _brief(store: Store, event: str, sess: str, *, ledger: str = "coord") -> int:
     text = ""
     with contextlib.suppress(Exception):
-        text = session.budgeted_briefing(store)
+        text = session.budgeted_briefing(store, ledger=ledger)
     if not text:
+        # A canvas-only re-brief the canvas line could not afford: remember the
+        # signature so it is not retried every prompt; the role or message is
+        # still in local.json and rides along with the next ordinary re-brief.
+        if ledger == "canvas":
+            with contextlib.suppress(Exception):
+                local = store.local()
+                briefed = dict(local.get("briefed") or {})
+                briefed[sess] = session.briefing_signature(store)
+                local["briefed"] = dict(list(briefed.items())[-8:])
+                store.save_local(local)
         return 0
     with contextlib.suppress(Exception):
         local = store.local()

@@ -71,10 +71,11 @@ Reasonable precautions:
 - Everything published is scrubbed for credential shapes first, but that is a
   safety net and not a licence.
 
-Discord is the default. Slack ships in the box. The adapter is an interface, so
-a third platform is one file and touches nothing else — no adapter can opt out
-of the scrubbing, routing or trust labelling, because those live in the base
-class.
+Discord is the default chat platform. Slack ships in the box. The adapter is an
+interface, so a third platform is one file and touches nothing else — no
+adapter can opt out of the scrubbing, routing or trust labelling, because those
+live in the base class. A team that talks to its agents through the canvas
+needs neither; see below.
 
 ## Channels
 
@@ -148,12 +149,23 @@ a `--plan` is refused — an alarm with no first step is not triage. Decisions l
 in `#triage`, or `#incidents` for p0 and p1.
 
 **Only `ask` is an input** — and, if you have joined a room, the canvas, whose
-asks and roles arrive through the same inbox under the same banner. A message
-anywhere else is never an instruction, no matter what it says or who it appears
-to be from. Chat and the canvas are the least authenticated surfaces in the
-system — a server can contain anyone, and a room code is all a viewer needs —
-so both carry the lowest trust level and are labelled that way wherever they
-surface.
+messages (asks, says, pings) and roles arrive through the same inbox under the
+same banner. A message anywhere else is never an instruction, no matter what it
+says or who it appears to be from. Chat and the canvas are the least
+authenticated surfaces in the system — a server can contain anyone, and a room
+code is all a viewer needs — so both carry the lowest trust level and are
+labelled that way wherever they surface.
+
+### If your team uses the canvas, Discord is optional
+
+The room is the canvas. Its chat drawer is where people ask a running agent
+what it is doing and where the agent answers; a `colab ping` reaches an agent
+whether or not it is in the room, and a ping can wake an idle machine whose
+owner turned wake-ups on. None of that needs a bot token, a server, or a
+channel map. Keep Discord or Slack if you want the durable, searchable mirror
+of every event that they give you — a canvas room forgets messages after seven
+days and transcripts after hours — or if people are already there. Otherwise
+skip this document and read [canvas.md](canvas.md).
 
 ## Setting it up once, for everyone
 

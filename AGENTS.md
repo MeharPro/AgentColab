@@ -25,8 +25,10 @@ agentcolab/
   board.py       deterministic work assignment, leases, contested takes
   session.py     presence, the briefing, chat mirroring, token budget
   chat/          Discord + Slack adapters behind one interface
-  canvas.py      transcript tailer, sanitising per level, the daemon, roles and asks
+  canvas.py      transcript tailer, sanitising per level, the daemon, roles and messages
   canvas_relay.py the stdlib canvas relay, reference for the contract in docs/canvas-contract.md
+  wake.py        the wake listener: one connection to the room, the wake prompt, starting a session
+  wsclient.py    a stdlib WebSocket client, for the listener
   hooks.py       harness integration and the pre-edit warning
   mcp.py         MCP server over stdio, no SDK
   cli.py         every command
@@ -37,11 +39,14 @@ agentcolab/
 ```bash
 python3 tests/test_units.py          # fast, no network, no git
 bash tests/test_e2e.sh               # four agents, one repo, real git
+python3 tests/test_canvas.py         # tailers, sanitising, the daemon, the wake listener
+python3 tests/test_canvas_relay.py   # the stdlib relay against the contract
 python3 tests/check_stdlib_only.py   # zero dependencies, enforced
+bash tests/run_all.sh                # all of the above, one exit code
 ```
 
-Run all three before you propose anything. A behaviour change needs a test that
-fails without it.
+Run all of these before you propose anything — `run_all.sh` is the short way.
+A behaviour change needs a test that fails without it.
 
 ## Constraints that are not negotiable
 
@@ -79,6 +84,13 @@ bugs.
 - The canvas daemon must never be spawned inside `store.lock()`. The child
   inherits the lock's descriptor and holds it for as long as it lives, so every
   hook on the machine waits on a process that will not exit for thirty minutes.
+- A wake-up must never touch the harness's permission settings, and the
+  listener's local config — not the relay's flag — decides whether anything
+  starts. The relay is a display; a relay that could flip a machine's switch
+  would make a leaked owner link a remote-execution credential.
+- Transcript discovery must test each candidate's working directory against
+  this checkout and never fall back to "the newest file". The newest file on a
+  developer's machine is very often a session in a different repository.
 
 ## Style
 

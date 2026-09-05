@@ -5,7 +5,10 @@
 // that is not in the contract's route table, and hands the rest to the room's
 // object. The object holds the room in SQLite and serves viewers over
 // hibernating WebSockets, so an idle room costs nothing while tabs stay open.
-// docs/canvas-contract.md v1.2 is binding; section numbers below refer to it.
+// Agents' listeners hang off the same object the same way (§10.5): a machine
+// waiting to be woken holds one hibernated socket and bills nothing until a
+// message for it lands.
+// docs/canvas-contract.md v1.3 is binding; section numbers below refer to it.
 // Deliberately no imports beyond the runtime and no build step: the file that
 // is deployed is the file in the repository.
 
@@ -17,6 +20,7 @@ const SYM = "[23456789abcdefghjkmnpqrstvwxyz]";
 const RE_ROOM = new RegExp(`^${SYM}{4}-${SYM}{4}-${SYM}{2}$`);
 const RE_JOIN = new RegExp(`^${SYM}{4}-${SYM}{4}-${SYM}{2}\\.${SYM}{24}$`);
 const RE_TOKEN = new RegExp(`^at-${SYM}{32}$`);
+const RE_OWNER = new RegExp(`^ot-${SYM}{32}$`);
 const RE_TICKET = new RegExp(`^vt-${SYM}{32}$`);
 const RE_NAME = /^[a-z0-9][a-z0-9-]{0,47}$/;
 const RE_UINT = /^\d+$/;
@@ -31,16 +35,27 @@ const TAIL_EVENTS = 80;
 const REPLAY_BYTES = 2 * 1024 * 1024;
 const MAX_AGENTS = 12;
 const MAX_VIEWERS = 25;
-const MAX_OPEN_ASKS = 40;
+const MAX_AGENT_STREAMS = 4;
+const MAX_OPEN_ASKS = 200;
+const MESSAGES_SHOWN = 100;
 const MAX_RECORDS = 2000;
 const RECORDS_PER_FRAME = 200;
 const BUCKET_RATE = 2;
 const BUCKET_BURST = 10;
+// Agents post messages at 10 per minute per token (§10.1): a bucket of 10
+// refilled at one every six seconds.
+const MSG_BUCKET_RATE = 10 / 60;
+const MSG_BUCKET_BURST = 10;
 const ASK_GAP_MS = 5000;
 const ROLE_GAP_MS = 30000;
 const ALARM_MS = 15 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 const IDLE_WIPE_MS = 7 * 24 * 60 * 60 * 1000;
-const JSON_BODY_BYTES = 65536;
+const MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// The same ceiling as the Python relay's READ_CAP, so an over-long name or
+// text is answered 400 schema on its merits on both backends and only a body
+// no route could ever want is 413 (a batch has its own 64 KiB cap).
+const JSON_BODY_BYTES = 4 * 1024 * 1024;
 
 const STREAMS = ["summary", "tools", "full"];
 const KINDS = new Set(["agent", "text", "thinking", "tool_call", "tool_result",
@@ -49,11 +64,17 @@ const POSITIONAL = new Set(["text", "thinking", "tool_call", "tool_result",
   "prompt", "session", "gap"]);
 const CONTENT_KEYS = ["content", "new_string", "old_string", "edits", "cells",
   "patch", "new_source"];
+const MESSAGE_KINDS = ["ask", "ping", "say"];
+const WAKE_RESULTS = ["woke", "busy", "declined", "off"];
+const WAKE_FROM = ["agents", "room"];
 const POLICY_RANGES = {
   retention_min: [5, 720], ticket_ttl_s: [1, 3600], ask_ttl_s: [1, 604800],
 };
 const DEFAULT_POLICY = {
   max_stream: "tools", retention_min: 120, ticket_ttl_s: 600, ask_ttl_s: 86400,
+};
+const CLASS_NAMES = {
+  room: "room code", join: "join code", token: "agent token", owner: "owner token", ticket: "viewer ticket",
 };
 
 const ENC = new TextEncoder();
@@ -160,6 +181,7 @@ function classifyBearer(header) {
   if (RE_ROOM.test(v)) return { cls: "room", value: v };
   if (RE_JOIN.test(v)) return { cls: "join", value: v };
   if (RE_TOKEN.test(v)) return { cls: "token", value: v };
+  if (RE_OWNER.test(v)) return { cls: "owner", value: v };
   if (RE_TICKET.test(v)) return { cls: "ticket", value: v };
   return null;
 }
@@ -195,7 +217,7 @@ function roomName(v) {
   return s === "" ? "room" : s;
 }
 
-// The contract's route table (§3.16), matched exactly on method and path.
+// The contract's route table (§3.16 plus §10), matched exactly on method and path.
 const ROUTES = [
   ["POST", /^\/rooms$/, "rooms"],
   ["GET", /^\/healthz$/, "healthz"],
@@ -203,12 +225,16 @@ const ROUTES = [
   ["DELETE", /^\/r\/([^/]+)$/, "delete_room"],
   ["POST", /^\/r\/([^/]+)\/ticket$/, "ticket"],
   ["GET", /^\/r\/([^/]+)\/stream$/, "stream"],
+  ["GET", /^\/r\/([^/]+)\/agent-stream$/, "agent_stream"],
   ["GET", /^\/r\/([^/]+)\/events$/, "get_events"],
   ["POST", /^\/r\/([^/]+)\/events$/, "post_events"],
   ["POST", /^\/r\/([^/]+)\/agents\/([^/]+)$/, "register"],
   ["DELETE", /^\/r\/([^/]+)\/agents\/([^/]+)$/, "kick"],
+  ["PUT", /^\/r\/([^/]+)\/agents\/([^/]+)\/wake$/, "wake"],
   ["GET", /^\/r\/([^/]+)\/inbox$/, "inbox"],
-  ["POST", /^\/r\/([^/]+)\/asks$/, "ask"],
+  ["POST", /^\/r\/([^/]+)\/messages$/, "post_message"],
+  ["GET", /^\/r\/([^/]+)\/messages$/, "get_messages"],
+  ["POST", /^\/r\/([^/]+)\/wake-ack$/, "wake_ack"],
   ["PUT", /^\/r\/([^/]+)\/roles\/([^/]+)$/, "role"],
   ["PUT", /^\/r\/([^/]+)\/policy$/, "policy"],
   ["POST", /^\/r\/([^/]+)\/prune$/, "prune"],
@@ -234,7 +260,7 @@ function healthz() {
 async function readJsonBody(request) {
   const buf = new Uint8Array(await request.arrayBuffer());
   if (buf.length > JSON_BODY_BYTES) {
-    return { error: err(413, "oversize", "keep JSON request bodies under 64 KiB") };
+    return { error: err(413, "oversize", `the body is ${buf.length} bytes; a batch is at most 65,536`) };
   }
   const text = DEC.decode(buf);
   if (text.trim() === "") return { body: {}, bytes: buf.length };
@@ -256,7 +282,9 @@ export default {
     // A16: the internal creation path is answered here so it can never reach
     // an object from outside, whatever the assets layer does with it.
     if (path === "/__create" || path.startsWith("/__create/")) return noSuchRoute();
-    if (path === "/healthz" || path === "/rooms" || path.startsWith("/r/")) {
+    // Prefixes, not equality (§3.16): /roomsx and /healthz/x are API-shaped
+    // paths that are not routes, and must say so rather than serve the page.
+    if (path.startsWith("/r/") || path.startsWith("/rooms") || path.startsWith("/healthz")) {
       const m = matchRoute(request.method, path);
       if (!m) return noSuchRoute();
       if (m.name === "healthz") return healthz();
@@ -276,7 +304,7 @@ async function forward(env, room, request) {
   try {
     // The body is buffered here so an object that rejects before reading it
     // (404, 403, 401) never leaves a half-pumped stream behind; bodies are
-    // small by contract and the object enforces the 64 KiB caps itself.
+    // small by contract and the object enforces the byte caps itself.
     let forwarded = request;
     if (request.method === "POST" || request.method === "PUT") {
       forwarded = new Request(request, { body: await request.arrayBuffer() });
@@ -334,9 +362,13 @@ async function createRoom(request, env, url) {
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS agents (
-  name TEXT PRIMARY KEY, token_hash TEXT, harness TEXT, human TEXT, model TEXT,
+  name TEXT PRIMARY KEY, token_hash TEXT, owner_hash TEXT, harness TEXT, human TEXT, model TEXT,
   stream TEXT NOT NULL, snapshot TEXT, registered_at TEXT NOT NULL, last_seen TEXT NOT NULL,
-  kicked INTEGER NOT NULL DEFAULT 0, bucket REAL NOT NULL DEFAULT 10, bucket_at INTEGER NOT NULL DEFAULT 0);
+  kicked INTEGER NOT NULL DEFAULT 0, bucket REAL NOT NULL DEFAULT 10, bucket_at INTEGER NOT NULL DEFAULT 0,
+  mbucket REAL NOT NULL DEFAULT 10, mbucket_at INTEGER NOT NULL DEFAULT 0,
+  wake_enabled INTEGER NOT NULL DEFAULT 0, wake_from TEXT NOT NULL DEFAULT 'agents',
+  wake_max INTEGER NOT NULL DEFAULT 4, wake_used INTEGER NOT NULL DEFAULT 0,
+  wake_hour INTEGER NOT NULL DEFAULT 0, wake_set_by TEXT, wake_ts TEXT);
 CREATE TABLE IF NOT EXISTS log (
   rseq INTEGER PRIMARY KEY, t TEXT NOT NULL, agent TEXT, ts TEXT NOT NULL,
   bytes INTEGER NOT NULL, digest TEXT, body TEXT NOT NULL, npos INTEGER NOT NULL DEFAULT 0);
@@ -346,21 +378,92 @@ CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY, rid TEXT, ts TEXT, ts_ms INTEGER NOT NULL, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS roles (
   agent TEXT PRIMARY KEY, role TEXT, viewer TEXT, set_seq INTEGER NOT NULL, ts TEXT, changed_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS asks (
-  seq INTEGER PRIMARY KEY, id TEXT NOT NULL, to_agent TEXT NOT NULL, viewer TEXT NOT NULL,
-  text TEXT NOT NULL, ts TEXT NOT NULL, expires_ms INTEGER NOT NULL, state TEXT NOT NULL, answer TEXT);
+CREATE TABLE IF NOT EXISTS messages (
+  seq INTEGER PRIMARY KEY, id TEXT NOT NULL, kind TEXT NOT NULL, to_agent TEXT NOT NULL,
+  from_kind TEXT NOT NULL, from_name TEXT NOT NULL, text TEXT NOT NULL, ts TEXT NOT NULL,
+  ts_ms INTEGER NOT NULL, expires_ms INTEGER, state TEXT NOT NULL, answer TEXT,
+  wake_requested INTEGER NOT NULL DEFAULT 0, wake_state TEXT NOT NULL DEFAULT 'none',
+  wake_reason TEXT, wake_ts TEXT);
+CREATE INDEX IF NOT EXISTS messages_to ON messages (to_agent, seq);
 CREATE TABLE IF NOT EXISTS tickets (hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS viewer_rate (viewer TEXT PRIMARY KEY, at INTEGER NOT NULL);
 `;
+
+// Columns v1.3 added to `agents`; a room created under v1.2 gains them on its
+// first request after the deploy (§10, migration). Every one has a default so
+// ALTER TABLE can add it to a populated table.
+const AGENT_COLUMNS_V13 = [
+  ["owner_hash", "TEXT"],
+  ["mbucket", "REAL NOT NULL DEFAULT 10"],
+  ["mbucket_at", "INTEGER NOT NULL DEFAULT 0"],
+  ["wake_enabled", "INTEGER NOT NULL DEFAULT 0"],
+  ["wake_from", "TEXT NOT NULL DEFAULT 'agents'"],
+  ["wake_max", "INTEGER NOT NULL DEFAULT 4"],
+  ["wake_used", "INTEGER NOT NULL DEFAULT 0"],
+  ["wake_hour", "INTEGER NOT NULL DEFAULT 0"],
+  ["wake_set_by", "TEXT"],
+  ["wake_ts", "TEXT"],
+];
+
+const WAKE_NONE = { requested: false, state: "none", reason: null, ts: null };
+
+function tsMillis(ts) {
+  const parsed = typeof ts === "string" ? Date.parse(ts) : NaN;
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+// A v1.2 ask as a v1.3 message: same id, seq and state, a viewer sender and
+// no wake (§10.1 migration).
+function messageFromAsk(ask) {
+  return {
+    id: ask.id, seq: ask.seq, kind: "ask", to: ask.to,
+    from: { kind: "viewer", name: ask.viewer },
+    text: ask.text, ts: ask.ts, state: ask.state, answer: ask.answer === undefined ? null : ask.answer,
+    wake: { ...WAKE_NONE },
+  };
+}
 
 export class Room extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.sql.exec(SCHEMA);
+    this.migrate();
+    // The socket whose close is being handled: still listed by getWebSockets
+    // on some runtimes, so the listener count leaves it out (§10.3).
+    this.closing = null;
     // Keepalives are answered by the runtime so a tab's ping never wakes the
     // object; that is what makes an idle room free (§5).
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+  }
+
+  // A live room deployed under v1.2 keeps its agents and asks: missing agent
+  // columns are added, the `asks` table becomes `messages` rows of kind ask
+  // from a viewer with wake none, the `ask` log rows become `message` rows
+  // with the same rseq, and `asks` is dropped so this runs once.
+  migrate() {
+    const cols = new Set(this.sql.exec("PRAGMA table_info(agents)").toArray().map((r) => r.name));
+    for (const [name, decl] of AGENT_COLUMNS_V13) {
+      if (!cols.has(name)) this.sql.exec(`ALTER TABLE agents ADD COLUMN ${name} ${decl}`);
+    }
+    const legacy = this.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'asks'").toArray();
+    if (legacy.length === 0) return;
+    this.ctx.storage.transactionSync(() => {
+      for (const r of this.sql.exec("SELECT * FROM asks").toArray()) {
+        this.sql.exec(
+          "INSERT OR IGNORE INTO messages (seq, id, kind, to_agent, from_kind, from_name, text, ts, ts_ms, expires_ms, state, answer, wake_requested, wake_state, wake_reason, wake_ts) VALUES (?, ?, 'ask', ?, 'viewer', ?, ?, ?, ?, ?, ?, ?, 0, 'none', NULL, NULL)",
+          r.seq, r.id, r.to_agent, r.viewer, r.text, r.ts, tsMillis(r.ts), r.expires_ms, r.state, r.answer,
+        );
+      }
+      for (const r of this.sql.exec("SELECT rseq, body FROM log WHERE t = 'ask'").toArray()) {
+        let frame;
+        try { frame = JSON.parse(r.body); } catch (e) { continue; }
+        if (!isObj(frame) || !isObj(frame.ask)) continue;
+        const body = JSON.stringify({ t: "message", rseq: r.rseq, message: messageFromAsk(frame.ask) });
+        this.sql.exec("UPDATE log SET t = 'message', body = ? WHERE rseq = ?", body, r.rseq);
+      }
+      this.sql.exec("DROP TABLE asks");
+    });
   }
 
   // -- meta ---------------------------------------------------------------
@@ -430,12 +533,16 @@ export class Room extends DurableObject {
       case "records": return this.records(request, meta);
       case "ticket": return this.ticket(request, meta);
       case "stream": return this.stream(request, url, meta);
+      case "agent_stream": return this.agentStream(request, meta);
       case "get_events": return this.getEvents(request, url, meta);
       case "register": return this.register(request, meta, m.arg);
       case "kick": return this.kick(request, meta, m.arg);
+      case "wake": return this.wake(request, meta, m.arg);
       case "post_events": return this.postEvents(request, meta);
       case "inbox": return this.inbox(request, url, meta);
-      case "ask": return this.ask(request, meta);
+      case "post_message": return this.postMessage(request, meta);
+      case "get_messages": return this.getMessages(request, url, meta);
+      case "wake_ack": return this.wakeAck(request, meta);
       case "role": return this.role(request, meta, m.arg);
       case "policy": return this.policy(request, meta);
       case "delete_room": return this.deleteRoom(request, meta);
@@ -467,10 +574,10 @@ export class Room extends DurableObject {
   async authorize(request, meta, allowed) {
     const cred = classifyBearer(request.headers.get("Authorization"));
     if (!cred) {
-      return { error: err(401, "auth", "send Authorization: Bearer <room code, join code or agent token>") };
+      return { error: err(401, "auth", "send Authorization: Bearer <room code, join code, agent token or owner token>") };
     }
     if (!allowed.includes(cred.cls)) {
-      return { error: err(403, "forbidden", `this route does not accept a ${cred.cls === "token" ? "agent token" : cred.cls + " code"}; see the contract's route table`) };
+      return { error: err(403, "forbidden", `this route does not accept a ${CLASS_NAMES[cred.cls]}; see the contract's route table`) };
     }
     if (cred.cls === "room") {
       if (!safeEqual(cred.value, meta.room)) return { error: err(401, "auth", "that room code does not open this room") };
@@ -487,6 +594,12 @@ export class Room extends DurableObject {
       const rows = this.sql.exec("SELECT name FROM agents WHERE token_hash = ? AND kicked = 0", h).toArray();
       if (rows.length === 0) return { error: err(401, "auth", "unknown, rotated or kicked token; re-register with the join code") };
       return { cls: "token", agent: rows[0].name };
+    }
+    if (cred.cls === "owner") {
+      const h = await sha256hex(cred.value);
+      const rows = this.sql.exec("SELECT name FROM agents WHERE owner_hash = ? AND kicked = 0", h).toArray();
+      if (rows.length === 0) return { error: err(401, "auth", "unknown, rotated or kicked owner token; the agent's next registration prints a new owner link") };
+      return { cls: "owner", agent: rows[0].name };
     }
     return { error: err(403, "forbidden", "a viewer ticket only opens /stream as ?ticket=") };
   }
@@ -506,6 +619,23 @@ export class Room extends DurableObject {
       kicked: row.kicked === 1,
       role,
       snapshot: row.snapshot === null ? null : JSON.parse(row.snapshot),
+      wake: this.wakeObject(row),
+    };
+  }
+
+  // The relay's copy of the machine's switches plus the two fields only the
+  // relay knows: the hourly count (window = the relay's clock hour) and
+  // whether a listener socket is open right now (§10.3).
+  wakeObject(row) {
+    const hour = Math.floor(Date.now() / HOUR_MS);
+    return {
+      enabled: row.wake_enabled === 1,
+      from: row.wake_from,
+      max_per_hour: row.wake_max,
+      used_this_hour: row.wake_hour === hour ? row.wake_used : 0,
+      listener: this.agentSockets(row.name).length > 0 ? "connected" : "absent",
+      set_by: row.wake_set_by === undefined ? null : row.wake_set_by,
+      ts: row.wake_ts === undefined ? null : row.wake_ts,
     };
   }
 
@@ -520,19 +650,29 @@ export class Room extends DurableObject {
     return { role: rows[0].role, viewer: rows[0].viewer, set_seq: rows[0].set_seq, ts: rows[0].ts };
   }
 
-  askObject(row) {
+  messageObject(row) {
     return {
-      id: row.id, seq: row.seq, to: row.to_agent, viewer: row.viewer, text: row.text,
-      ts: row.ts, state: row.state, answer: row.answer === null ? null : JSON.parse(row.answer),
+      id: row.id, seq: row.seq, kind: row.kind, to: row.to_agent,
+      from: { kind: row.from_kind, name: row.from_name },
+      text: row.text, ts: row.ts, state: row.state,
+      answer: row.answer === null ? null : JSON.parse(row.answer),
+      wake: {
+        requested: row.wake_requested === 1, state: row.wake_state,
+        reason: row.wake_reason, ts: row.wake_ts,
+      },
     };
+  }
+
+  messageById(id) {
+    const rows = this.sql.exec("SELECT * FROM messages WHERE id = ?", id).toArray();
+    return rows.length ? rows[0] : null;
   }
 
   roomObject(meta) {
     const agents = this.sql.exec("SELECT * FROM agents ORDER BY name").toArray().map((r) => this.agentObject(r));
-    const open = this.sql.exec("SELECT * FROM asks WHERE state = 'open'").toArray();
-    const closed = this.sql.exec("SELECT * FROM asks WHERE state != 'open' ORDER BY seq DESC LIMIT ?", MAX_OPEN_ASKS).toArray();
-    const asks = open.concat(closed).sort((a, b) => a.seq - b.seq).map((r) => this.askObject(r));
-    return { room: meta.room, name: meta.name, rseq: meta.rseq, policy: meta.policy, agents, asks };
+    const messages = this.sql.exec("SELECT * FROM messages ORDER BY seq DESC LIMIT ?", MESSAGES_SHOWN)
+      .toArray().reverse().map((r) => this.messageObject(r));
+    return { room: meta.room, name: meta.name, rseq: meta.rseq, policy: meta.policy, agents, messages };
   }
 
   recordEvents() {
@@ -541,13 +681,31 @@ export class Room extends DurableObject {
 
   // -- broadcast ----------------------------------------------------------
 
-  broadcast(frames) {
+  sendTo(sockets, frames) {
     if (frames.length === 0) return;
-    for (const ws of this.ctx.getWebSockets("viewer")) {
+    for (const ws of sockets) {
       for (const f of frames) {
         try { ws.send(f); } catch (e) { /* a closing socket; the runtime drops it */ }
       }
     }
+  }
+
+  broadcast(frames) {
+    this.sendTo(this.ctx.getWebSockets("viewer"), frames);
+  }
+
+  // The agent-stream sockets a frame about `name` goes to: "*" is every
+  // agent's (a room-wide say, a policy change), a name is that agent's only.
+  agentSockets(name) {
+    const list = name === "*" ? this.ctx.getWebSockets("agent") : this.ctx.getWebSockets(`agent:${name}`);
+    return this.closing === null ? list : list.filter((ws) => ws !== this.closing);
+  }
+
+  // Viewers get every frame; an agent's stream only what is about it (§10.5).
+  // `name` is the agent concerned, "*" for everyone, null for viewers only.
+  publish(frames, name) {
+    this.broadcast(frames);
+    if (name !== null) this.sendTo(this.agentSockets(name), frames);
   }
 
   emitAgent(name) {
@@ -604,12 +762,8 @@ export class Room extends DurableObject {
     }
     const cursor = after !== null ? after : before;
     if (!RE_UINT.test(cursor)) return err(400, "schema", "after and before must be non-negative integers");
-    let limit = 50;
-    if (q.get("limit") !== null) {
-      if (!RE_UINT.test(q.get("limit"))) return err(400, "schema", "limit must be an integer from 1 to 200");
-      limit = Number(q.get("limit"));
-      if (limit < 1 || limit > 200) return err(400, "schema", "limit must be an integer from 1 to 200");
-    }
+    const limit = readLimit(q);
+    if (limit === null) return err(400, "schema", "limit must be an integer from 1 to 200");
     const fresh = this.loadMeta();
     const agent = q.get("agent");
     if (agent !== null) {
@@ -629,6 +783,24 @@ export class Room extends DurableObject {
     if (more) rows.length = limit;
     if (before !== null) rows.reverse();
     return json(200, { rseq: fresh.rseq, frames: rows.map((r) => JSON.parse(r.body)), more });
+  }
+
+  async getMessages(request, url, meta) {
+    const a = await this.authorize(request, meta, ["room"]);
+    if (a.error) return a.error;
+    const q = url.searchParams;
+    let after = 0;
+    if (q.get("after") !== null) {
+      if (!RE_UINT.test(q.get("after"))) return err(400, "schema", "after must be a non-negative integer");
+      after = Number(q.get("after"));
+    }
+    const limit = readLimit(q);
+    if (limit === null) return err(400, "schema", "limit must be an integer from 1 to 200");
+    const fresh = this.loadMeta();
+    const rows = this.sql.exec("SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?", after, limit + 1).toArray();
+    const more = rows.length > limit;
+    if (more) rows.length = limit;
+    return json(200, { rseq: fresh.rseq, messages: rows.map((r) => this.messageObject(r)), more });
   }
 
   // -- routes: stream -----------------------------------------------------
@@ -669,6 +841,36 @@ export class Room extends DurableObject {
     this.ctx.acceptWebSocket(server, ["viewer"]);
     server.serializeAttachment({ after, at: Date.now() });
     for (const frame of this.backfill(this.loadMeta(), after)) server.send(frame);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // The listener's socket (§10.5): header auth only, no backfill (the inbox
+  // is the catch-up), hello then the frames about this agent. The first
+  // socket for a name flips `listener` to connected and says so with an
+  // `agent` frame; the last one closing flips it back (webSocketClose).
+  async agentStream(request, meta) {
+    const a = await this.authorize(request, meta, ["token"]);
+    if (a.error) return a.error;
+    if ((request.headers.get("Upgrade") || "").toLowerCase() !== "websocket") {
+      return err(400, "schema", "open /agent-stream as a WebSocket; this relay advertises transports [\"ws\"] on /healthz");
+    }
+    const name = a.agent;
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    const open = this.agentSockets(name).length;
+    if (open >= MAX_AGENT_STREAMS) {
+      this.ctx.acceptWebSocket(server, ["full"]);
+      server.send(JSON.stringify({ t: "full" }));
+      server.close(1000, "full");
+      return new Response(null, { status: 101, webSocket: client });
+    }
+    this.ctx.acceptWebSocket(server, ["agent", `agent:${name}`]);
+    server.serializeAttachment({ agent: name, at: Date.now() });
+    const fresh = this.loadMeta();
+    server.send(JSON.stringify({
+      t: "hello", transport: "ws", agent: this.agentObject(this.agentByName(name)), policy: fresh.policy,
+    }));
+    if (open === 0) this.publish([this.emitAgent(name)], name);
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -721,11 +923,33 @@ export class Room extends DurableObject {
     return out;
   }
 
-  // Viewers never send anything the relay acts on; asks and roles are HTTP so
-  // both transports stay symmetric. Keepalives never reach here.
+  // Viewers and listeners never send anything the relay acts on; messages,
+  // acks and roles are HTTP so both transports stay symmetric. Keepalives
+  // never reach here.
   async webSocketMessage() {}
-  async webSocketClose() {}
-  async webSocketError() {}
+
+  async webSocketClose(ws) { this.listenerGone(ws); }
+
+  async webSocketError(ws) { this.listenerGone(ws); }
+
+  // The last agent-stream socket of a name closing flips `listener` to absent
+  // (§10.3). Close and error can both fire for one socket, so the attachment
+  // remembers that it was counted out; a viewer socket carries no agent and
+  // needs nothing.
+  listenerGone(ws) {
+    let att = null;
+    try { att = ws.deserializeAttachment(); } catch (e) { att = null; }
+    if (!isObj(att) || typeof att.agent !== "string" || att.closed) return;
+    try { ws.serializeAttachment({ ...att, closed: true }); } catch (e) { /* already gone; a repeat only re-sends one frame */ }
+    this.closing = ws;
+    try {
+      if (this.agentSockets(att.agent).length === 0 && this.agentByName(att.agent)) {
+        this.publish([this.emitAgent(att.agent)], att.agent);
+      }
+    } finally {
+      this.closing = null;
+    }
+  }
 
   // -- routes: agents -----------------------------------------------------
 
@@ -751,37 +975,87 @@ export class Room extends DurableObject {
       const live = this.sql.exec("SELECT COUNT(*) AS n FROM agents WHERE kicked = 0").one().n;
       if (live >= MAX_AGENTS) return err(503, "full", "the room holds 12 live agents; kick one with DELETE /r/{room}/agents/{name}");
     }
+    // Both credentials rotate together (§10.2): the owner link printed at the
+    // last registration is the only one that opens this agent's switches.
     const token = `at-${randomSymbols(32)}`;
+    const ownerToken = `ot-${randomSymbols(32)}`;
     const hash = await sha256hex(token);
+    const ownerHash = await sha256hex(ownerToken);
     const now = nowIso();
     if (existing) {
       this.sql.exec(
-        "UPDATE agents SET token_hash = ?, harness = ?, human = ?, model = ?, stream = ?, last_seen = ?, kicked = 0 WHERE name = ?",
-        hash, fields.harness, fields.human, fields.model, stream, now, name,
+        "UPDATE agents SET token_hash = ?, owner_hash = ?, harness = ?, human = ?, model = ?, stream = ?, last_seen = ?, kicked = 0 WHERE name = ?",
+        hash, ownerHash, fields.harness, fields.human, fields.model, stream, now, name,
       );
     } else {
       this.sql.exec(
-        "INSERT INTO agents (name, token_hash, harness, human, model, stream, snapshot, registered_at, last_seen, kicked, bucket, bucket_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?)",
-        name, hash, fields.harness, fields.human, fields.model, stream, now, now, BUCKET_BURST, Date.now(),
+        "INSERT INTO agents (name, token_hash, owner_hash, harness, human, model, stream, snapshot, registered_at, last_seen, kicked, bucket, bucket_at, mbucket, mbucket_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, ?)",
+        name, hash, ownerHash, fields.harness, fields.human, fields.model, stream, now, now,
+        BUCKET_BURST, Date.now(), MSG_BUCKET_BURST, Date.now(),
       );
     }
-    this.broadcast([this.emitAgent(name)]);
+    this.publish([this.emitAgent(name)], name);
     const effective = STREAMS[Math.min(STREAMS.indexOf(stream), STREAMS.indexOf(fresh.policy.max_stream))];
-    return json(200, { token, rseq: fresh.rseq, policy: fresh.policy, effective_stream: effective });
+    return json(200, { token, owner_token: ownerToken, rseq: fresh.rseq, policy: fresh.policy, effective_stream: effective });
   }
 
   async kick(request, meta, name) {
-    const a = await this.authorize(request, meta, ["join", "token"]);
+    const a = await this.authorize(request, meta, ["join", "token", "owner"]);
     if (a.error) return a.error;
-    if (a.cls === "token" && a.agent !== name) {
-      return err(403, "forbidden", "an agent token can only remove its own name");
+    if (a.cls !== "join" && a.agent !== name) {
+      return err(403, "forbidden", `an ${CLASS_NAMES[a.cls]} can only remove its own agent`);
     }
     const row = this.agentByName(name);
     if (!row) return err(404, "agent", "no agent of that name was ever registered here");
     if (row.kicked === 1) return noContent();
-    this.sql.exec("UPDATE agents SET kicked = 1, token_hash = NULL WHERE name = ?", name);
-    this.broadcast([this.emitAgent(name)]);
+    this.sql.exec("UPDATE agents SET kicked = 1, token_hash = NULL, owner_hash = NULL WHERE name = ?", name);
+    this.publish([this.emitAgent(name)], name);
     return noContent();
+  }
+
+  // PUT /agents/{name}/wake (§10.3): the machine's owner or the agent itself
+  // flips the switches the relay displays; the listener hears about it on
+  // its stream as a `wake` frame with no message, and applies it locally.
+  async wake(request, meta, name) {
+    const a = await this.authorize(request, meta, ["owner", "token"]);
+    if (a.error) return a.error;
+    if (a.agent !== name) {
+      return err(403, "forbidden", `an ${CLASS_NAMES[a.cls]} only changes its own agent's wake settings`);
+    }
+    const read = await readJsonBody(request);
+    if (read.error) return read.error;
+    const b = read.body;
+    const row = this.agentByName(name);
+    let enabled = row.wake_enabled;
+    let from = row.wake_from;
+    let max = row.wake_max;
+    let touched = 0;
+    if (hasOwn(b, "enabled")) {
+      if (typeof b.enabled !== "boolean") return err(400, "schema", "enabled must be true or false");
+      enabled = b.enabled ? 1 : 0;
+      touched += 1;
+    }
+    if (hasOwn(b, "from")) {
+      if (!WAKE_FROM.includes(b.from)) return err(400, "schema", "from must be agents or room");
+      from = b.from;
+      touched += 1;
+    }
+    if (hasOwn(b, "max_per_hour")) {
+      if (!Number.isInteger(b.max_per_hour) || b.max_per_hour < 1 || b.max_per_hour > 60) {
+        return err(400, "schema", "max_per_hour must be an integer from 1 to 60");
+      }
+      max = b.max_per_hour;
+      touched += 1;
+    }
+    if (touched === 0) return err(400, "schema", "send at least one of enabled, from, max_per_hour");
+    this.sql.exec(
+      "UPDATE agents SET wake_enabled = ?, wake_from = ?, wake_max = ?, wake_set_by = ?, wake_ts = ? WHERE name = ?",
+      enabled, from, max, a.cls === "owner" ? "owner" : "agent", nowIso(), name,
+    );
+    const settings = this.wakeObject(this.agentByName(name));
+    this.publish([this.emitAgent(name)], name);
+    this.sendTo(this.agentSockets(name), [JSON.stringify({ t: "wake", message: null, settings })]);
+    return json(200, { wake: settings });
   }
 
   // -- routes: events -----------------------------------------------------
@@ -797,6 +1071,19 @@ export class Room extends DurableObject {
       return Math.max(1, Math.ceil((1 - level) / BUCKET_RATE));
     }
     this.sql.exec("UPDATE agents SET bucket = ?, bucket_at = ? WHERE name = ?", level - 1, now, name);
+    return null;
+  }
+
+  // The same shape for messages an agent posts (§10.1: 10 per minute).
+  takeMessageToken(name) {
+    const row = this.agentByName(name);
+    const now = Date.now();
+    const level = Math.min(MSG_BUCKET_BURST, row.mbucket + ((now - row.mbucket_at) / 1000) * MSG_BUCKET_RATE);
+    if (level < 1) {
+      this.sql.exec("UPDATE agents SET mbucket = ?, mbucket_at = ? WHERE name = ?", level, now, name);
+      return Math.max(1, Math.ceil((1 - level) / MSG_BUCKET_RATE));
+    }
+    this.sql.exec("UPDATE agents SET mbucket = ?, mbucket_at = ? WHERE name = ?", level - 1, now, name);
     return null;
   }
 
@@ -831,7 +1118,9 @@ export class Room extends DurableObject {
     const level = fresh.policy.max_stream;
     const stored = [];
     const rejected = [];
-    const frames = [];
+    // [frame, recipient]: batch frames go to viewers only, agent frames to the
+    // agent's own stream too, message frames to whoever the message is for.
+    const out = [];
     const answered = [];
     let accepted = 0;
     let dup = 0;
@@ -847,20 +1136,27 @@ export class Room extends DurableObject {
       if (!KINDS.has(ev.kind)) { rejected.push({ id, why: "kind" }); continue; }
       if (violatesPolicy(ev, level)) { rejected.push({ id, why: "policy" }); continue; }
       if (ev.kind === "answer") {
+        // §10.1: an open ask addressed to this token, and nothing else; the
+        // second answer in one batch finds it already claimed.
         const askId = ev.body.ask;
-        const rows = typeof askId === "string"
-          ? this.sql.exec("SELECT * FROM asks WHERE id = ?", askId).toArray() : [];
-        if (rows.length === 0 || rows[0].to_agent !== name) { rejected.push({ id, why: "schema" }); continue; }
-        if (rows[0].state === "open" && !answered.some((x) => x.row.id === askId)) {
-          answered.push({ row: rows[0], text: typeof ev.body.text === "string" ? ev.body.text : "", ts: ev.ts });
+        const row = typeof askId === "string" ? this.messageById(askId) : null;
+        if (!row || row.kind !== "ask" || row.to_agent !== name || row.state !== "open"
+            || answered.some((x) => x.row.id === askId)) {
+          rejected.push({ id, why: "schema" });
+          continue;
         }
+        // Stored as sent, like the Python relay: a missing text is null.
+        answered.push({ row, text: ev.body.text === undefined ? null : ev.body.text, ts: ev.ts });
       } else if (ev.kind === "record") {
         if (this.sql.exec("SELECT 1 FROM records WHERE id = ?", ev.id).toArray().length) { dup += 1; continue; }
-        this.holdRecord(ev);
+        // Same rid with an older body.ts is a stale version of something we
+        // already hold: counted as dup and kept out of the batch row, like the
+        // Python relay (§6.4, F1).
+        if (!this.holdRecord(ev)) { dup += 1; continue; }
       } else if (ev.kind === "agent") {
         accepted += 1;
         this.sql.exec("UPDATE agents SET snapshot = ?, last_seen = ? WHERE name = ?", JSON.stringify(ev.body), now, name);
-        frames.push(this.emitAgent(name));
+        out.push([this.emitAgent(name), name]);
         continue;
       }
       accepted += 1;
@@ -876,17 +1172,17 @@ export class Room extends DurableObject {
         rseq, name, now, buf.length, digest, frame, npos,
       );
       this.setMeta("last_batch_at", now);
-      frames.push(frame);
+      out.push([frame, null]);
       answered.sort((x, y) => x.row.seq - y.row.seq);
       for (const { row, text, ts } of answered) {
         const answer = JSON.stringify({ text, ts });
-        this.sql.exec("UPDATE asks SET state = 'answered', answer = ? WHERE seq = ?", answer, row.seq);
-        const ask = this.askObject({ ...row, state: "answered", answer });
-        frames.push(this.appendRow(fresh, "ask", row.to_agent, { ask }, 0, 0).frame);
+        this.sql.exec("UPDATE messages SET state = 'answered', answer = ? WHERE seq = ?", answer, row.seq);
+        const message = this.messageObject({ ...row, state: "answered", answer });
+        out.push([this.appendRow(fresh, "message", row.to_agent, { message }, 0, 0).frame, row.to_agent]);
       }
       this.enforceBytes(fresh, name);
     }
-    this.broadcast(frames);
+    for (const [frame, to] of out) this.publish([frame], to);
     return json(202, { rseq, accepted, dup, rejected });
   }
 
@@ -900,11 +1196,12 @@ export class Room extends DurableObject {
     const tsMs = Number.isNaN(parsed) ? -1 : parsed;
     if (rid !== null) {
       const held = this.sql.exec("SELECT id, ts_ms FROM records WHERE rid = ?", rid).toArray();
-      if (held.some((h) => h.ts_ms > tsMs)) return;
+      if (held.some((h) => h.ts_ms > tsMs)) return false;
       for (const h of held) this.sql.exec("DELETE FROM records WHERE id = ?", h.id);
     }
     this.sql.exec("INSERT INTO records (id, rid, ts, ts_ms, body) VALUES (?, ?, ?, ?, ?)", ev.id, rid, ts, tsMs, JSON.stringify(ev));
     this.trimRecords();
+    return true;
   }
 
   trimRecords() {
@@ -937,7 +1234,7 @@ export class Room extends DurableObject {
     }
   }
 
-  // -- routes: inbox, asks, roles, policy --------------------------------
+  // -- routes: inbox, messages, wake-acks, roles, policy -------------------
 
   async inbox(request, url, meta) {
     const a = await this.authorize(request, meta, ["token"]);
@@ -950,53 +1247,140 @@ export class Room extends DurableObject {
     }
     const fresh = this.loadMeta();
     this.sql.exec("UPDATE agents SET last_seen = ? WHERE name = ?", nowIso(), a.agent);
-    const asks = this.sql.exec(
-      "SELECT id, seq, viewer, text, ts FROM asks WHERE state = 'open' AND to_agent = ? AND seq > ? ORDER BY seq", a.agent, after,
-    ).toArray().map((r) => ({ id: r.id, seq: r.seq, viewer: r.viewer, text: r.text, ts: r.ts }));
-    return json(200, { rseq: fresh.rseq, role: this.roleObject(a.agent), asks });
+    const messages = this.sql.exec(
+      "SELECT * FROM messages WHERE seq > ? AND (to_agent = ? OR to_agent = '*') ORDER BY seq", after, a.agent,
+    ).toArray().map((r) => this.messageObject(r));
+    return json(200, { rseq: fresh.rseq, role: this.roleObject(a.agent), messages });
   }
 
-  async ask(request, meta) {
-    const a = await this.authorize(request, meta, ["room"]);
+  // POST /messages (§10.1): a viewer's or an agent's line to one agent or the
+  // room. Check order per §0: schema, then the target, then rate, then the
+  // open-ask cap, so a refused request spends nothing.
+  async postMessage(request, meta) {
+    const a = await this.authorize(request, meta, ["room", "token"]);
     if (a.error) return a.error;
     const read = await readJsonBody(request);
     if (read.error) return read.error;
     const b = read.body;
-    if (typeof b.to !== "string") return err(400, "schema", "to must name an agent in the room");
-    const viewer = humanField(b.viewer, 40);
-    if (viewer === null || viewer === "") return err(400, "schema", "viewer is required: a name of at most 40 characters");
-    const text = humanField(b.text, 500);
-    if (text === null) return err(400, "schema", "text must be a string of at most 500 characters");
-    const target = this.agentByName(b.to);
-    if (!target || target.kicked === 1) return err(404, "agent", "no live agent of that name; see GET /r/{room}.agents");
-    const now = Date.now();
-    const last = this.sql.exec("SELECT at FROM viewer_rate WHERE viewer = ?", viewer).toArray();
-    if (last.length && now - last[0].at < ASK_GAP_MS) {
-      const wait = Math.max(1, Math.ceil((ASK_GAP_MS - (now - last[0].at)) / 1000));
-      return err(429, "rate", `one ask per viewer every 5 s; wait ${wait}s`, { "Retry-After": String(wait) });
+    if (typeof b.to !== "string" || b.to === "") {
+      return err(400, "schema", "to must name an agent in the room, or \"*\" for everyone");
     }
-    const open = this.sql.exec("SELECT COUNT(*) AS n FROM asks WHERE state = 'open'").one().n;
-    if (open >= MAX_OPEN_ASKS) return err(503, "full", "40 asks are already open in this room; wait for answers or expiry");
+    const everyone = b.to === "*";
+    const kind = b.kind === undefined ? (everyone ? "say" : "ask") : b.kind;
+    if (!MESSAGE_KINDS.includes(kind)) return err(400, "schema", "kind must be one of ask, ping, say");
+    const text = humanField(b.text, 2000);
+    if (text === null || text === "") return err(400, "schema", "text is required: 1 to 2,000 characters");
+    if (b.wake !== undefined && typeof b.wake !== "boolean") return err(400, "schema", "wake must be true or false");
+    let from;
+    if (a.cls === "room") {
+      const viewer = humanField(b.viewer, 40);
+      if (viewer === null || viewer === "") return err(400, "schema", "viewer is required: a name of at most 40 characters");
+      from = { kind: "viewer", name: viewer };
+    } else {
+      from = { kind: "agent", name: a.agent };
+    }
+    let target = null;
+    if (!everyone) {
+      target = this.agentByName(b.to);
+      if (!target || target.kicked === 1) return err(404, "agent", "no live agent of that name; see GET /r/{room}.agents");
+    }
+    const now = Date.now();
+    if (a.cls === "room") {
+      const last = this.sql.exec("SELECT at FROM viewer_rate WHERE viewer = ?", from.name).toArray();
+      if (last.length && now - last[0].at < ASK_GAP_MS) {
+        const wait = Math.max(1, Math.ceil((ASK_GAP_MS - (now - last[0].at)) / 1000));
+        return err(429, "rate", `one message per viewer every 5 s; wait ${wait}s`, { "Retry-After": String(wait) });
+      }
+    }
+    if (kind === "ask") {
+      const open = this.sql.exec("SELECT COUNT(*) AS n FROM messages WHERE kind = 'ask' AND state = 'open'").one().n;
+      if (open >= MAX_OPEN_ASKS) return err(503, "full", `${MAX_OPEN_ASKS} asks are already open in this room; wait for answers or expiry`);
+    }
+    if (a.cls === "token") {
+      const wait = this.takeMessageToken(a.agent);
+      if (wait !== null) {
+        return err(429, "rate", `wait ${wait}s; an agent may post 10 messages per minute`, { "Retry-After": String(wait) });
+      }
+    } else {
+      this.sql.exec("INSERT INTO viewer_rate (viewer, at) VALUES (?, ?) ON CONFLICT(viewer) DO UPDATE SET at = excluded.at", from.name, now);
+    }
     const fresh = this.loadMeta();
-    this.sql.exec("INSERT INTO viewer_rate (viewer, at) VALUES (?, ?) ON CONFLICT(viewer) DO UPDATE SET at = excluded.at", viewer, now);
     const seq = this.nextRseq(fresh);
-    const id = `ca-${fresh.room4}-${seq}`;
+    const id = `cm-${fresh.room4}-${seq}`;
     const ts = nowIso();
+    // The relay only says whether a push can reach anyone right now; every
+    // later state is the machine's, via /wake-ack (§10.1, §10.4).
+    const requested = !everyone && b.wake === true;
+    let wakeState = "none";
+    let wakeReason = null;
+    if (requested) {
+      const w = this.wakeObject(target);
+      if (!w.enabled) wakeState = "off";
+      // `from: agents` means only a token-authenticated sender may wake this
+      // agent (§10.3); a viewer's request is answered here, like the Python
+      // relay does, rather than pushed to a machine that would only decline it.
+      else if (w.from === "agents" && from.kind !== "agent") { wakeState = "declined"; wakeReason = "sender not allowed"; }
+      else if (w.listener !== "connected") wakeState = "nobody";
+      else if (w.used_this_hour >= w.max_per_hour) { wakeState = "busy"; wakeReason = "hourly cap"; }
+      else wakeState = "pending";
+    }
     this.sql.exec(
-      "INSERT INTO asks (seq, id, to_agent, viewer, text, ts, expires_ms, state, answer) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', NULL)",
-      seq, id, b.to, viewer, text, ts, now + fresh.policy.ask_ttl_s * 1000,
+      "INSERT INTO messages (seq, id, kind, to_agent, from_kind, from_name, text, ts, ts_ms, expires_ms, state, answer, wake_requested, wake_state, wake_reason, wake_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL)",
+      seq, id, kind, b.to, from.kind, from.name, text, ts, now,
+      kind === "ask" ? now + fresh.policy.ask_ttl_s * 1000 : null,
+      kind === "ask" ? "open" : "sent", requested ? 1 : 0, wakeState, wakeReason,
     );
-    const ask = { id, seq, to: b.to, viewer, text, ts, state: "open", answer: null };
-    const frame = JSON.stringify({ t: "ask", rseq: seq, ask });
-    this.sql.exec("INSERT INTO log (rseq, t, agent, ts, bytes, digest, body, npos) VALUES (?, 'ask', ?, ?, ?, NULL, ?, 0)", seq, b.to, ts, read.bytes, frame);
-    this.broadcast([frame]);
+    const message = this.messageObject(this.messageById(id));
+    const frame = JSON.stringify({ t: "message", rseq: seq, message });
+    this.sql.exec("INSERT INTO log (rseq, t, agent, ts, bytes, digest, body, npos) VALUES (?, 'message', ?, ?, ?, NULL, ?, 0)", seq, b.to, ts, read.bytes, frame);
+    this.publish([frame], b.to);
+    if (wakeState === "pending") {
+      // Not a row: the message frame just before it is, and shares its rseq (§10.5).
+      this.sendTo(this.agentSockets(b.to), [JSON.stringify({ t: "wake", rseq: seq, message, settings: this.wakeObject(target) })]);
+    }
     return json(201, { id, seq });
   }
 
-  async role(request, meta, name) {
-    const a = await this.authorize(request, meta, ["room", "token"]);
+  // POST /wake-ack (§10.4): the machine reports what it did with a push.
+  async wakeAck(request, meta) {
+    const a = await this.authorize(request, meta, ["token"]);
     if (a.error) return a.error;
-    if (a.cls === "token" && a.agent !== name) return err(403, "forbidden", "an agent token can only set its own role");
+    const read = await readJsonBody(request);
+    if (read.error) return read.error;
+    const b = read.body;
+    if (typeof b.message !== "string") return err(400, "schema", "message must be the id of the message that woke you (cm-…)");
+    if (!WAKE_RESULTS.includes(b.result)) return err(400, "schema", "result must be one of woke, busy, declined, off");
+    let reason = null;
+    if (b.reason !== undefined && b.reason !== null) {
+      reason = humanField(b.reason, 200);
+      if (reason === null) return err(400, "schema", "reason must be null or a string of at most 200 characters");
+    }
+    const row = this.messageById(b.message);
+    if (!row || row.to_agent !== a.agent || !["pending", "busy"].includes(row.wake_state)) {
+      return err(400, "schema", "that message is not addressed to you or is not awaiting a wake-ack");
+    }
+    const now = Date.now();
+    const ts = nowIso();
+    this.sql.exec("UPDATE messages SET wake_state = ?, wake_reason = ?, wake_ts = ? WHERE seq = ?", b.result, reason, ts, row.seq);
+    if (b.result === "woke") {
+      const hour = Math.floor(now / HOUR_MS);
+      const agent = this.agentByName(a.agent);
+      const used = agent.wake_hour === hour ? agent.wake_used : 0;
+      this.sql.exec("UPDATE agents SET wake_used = ?, wake_hour = ? WHERE name = ?", used + 1, hour, a.agent);
+    }
+    const fresh = this.loadMeta();
+    const message = this.messageObject(this.messageById(b.message));
+    const { frame } = this.appendRow(fresh, "message", row.to_agent, { message }, read.bytes, 0);
+    this.publish([frame], row.to_agent);
+    return json(200, { message });
+  }
+
+  async role(request, meta, name) {
+    const a = await this.authorize(request, meta, ["room", "token", "owner"]);
+    if (a.error) return a.error;
+    if (a.cls !== "room" && a.agent !== name) {
+      return err(403, "forbidden", `an ${CLASS_NAMES[a.cls]} can only set its own agent's role`);
+    }
     const read = await readJsonBody(request);
     if (read.error) return read.error;
     const b = read.body;
@@ -1032,7 +1416,7 @@ export class Room extends DurableObject {
     const obj = role === null ? null : { role, viewer, set_seq: seq, ts };
     const frame = JSON.stringify({ t: "role", rseq: seq, agent: name, role: obj });
     this.sql.exec("INSERT INTO log (rseq, t, agent, ts, bytes, digest, body, npos) VALUES (?, 'role', ?, ?, ?, NULL, ?, 0)", seq, name, ts, read.bytes, frame);
-    this.broadcast([frame]);
+    this.publish([frame], name);
     return json(200, { set_seq: seq });
   }
 
@@ -1048,7 +1432,7 @@ export class Room extends DurableObject {
     }
     this.setMeta("policy", JSON.stringify(merged));
     const { frame } = this.appendRow(fresh, "policy", null, { policy: merged }, read.bytes, 0);
-    this.broadcast([frame]);
+    this.publish([frame], "*");
     return json(200, { policy: merged });
   }
 
@@ -1110,20 +1494,31 @@ export class Room extends DurableObject {
     this.enforceBytes(meta, null);
     this.sql.exec("DELETE FROM tickets WHERE expires <= ?", now);
     this.sql.exec("DELETE FROM viewer_rate WHERE at < ?", now - ASK_GAP_MS);
-    const frames = [];
-    const expired = this.sql.exec("SELECT * FROM asks WHERE state = 'open' AND expires_ms <= ? ORDER BY seq", now).toArray();
+    // Messages live 7 days from their ts whatever their kind or state (§10.1);
+    // an ask still open past ask_ttl_s expires in place, with a frame.
+    this.sql.exec("DELETE FROM messages WHERE ts_ms < ?", now - MESSAGE_TTL_MS);
+    const expired = this.sql.exec(
+      "SELECT * FROM messages WHERE kind = 'ask' AND state = 'open' AND expires_ms IS NOT NULL AND expires_ms <= ? ORDER BY seq", now,
+    ).toArray();
     for (const row of expired) {
-      this.sql.exec("UPDATE asks SET state = 'expired' WHERE seq = ?", row.seq);
-      const ask = this.askObject({ ...row, state: "expired", answer: null });
-      frames.push(this.appendRow(meta, "ask", row.to_agent, { ask }, 0, 0).frame);
+      this.sql.exec("UPDATE messages SET state = 'expired' WHERE seq = ?", row.seq);
+      const message = this.messageObject({ ...row, state: "expired", answer: null });
+      this.publish([this.appendRow(meta, "message", row.to_agent, { message }, 0, 0).frame], row.to_agent);
     }
     this.trimRecords();
-    this.broadcast(frames);
     return false;
   }
 }
 
 // ---------------------------------------------------------------- events
+
+// `limit` query parameter: 50 by default, 1–200, null when ill-formed.
+function readLimit(q) {
+  if (q.get("limit") === null) return 50;
+  if (!RE_UINT.test(q.get("limit"))) return null;
+  const limit = Number(q.get("limit"));
+  return limit < 1 || limit > 200 ? null : limit;
+}
 
 // Splits the raw body on 0x0A so each line's byte length is exact rather than
 // re-encoded; blank and whitespace-only lines are dropped here (§3.8).

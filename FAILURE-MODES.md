@@ -47,6 +47,12 @@ that are known not to work.
   harness on Windows, the frontend beyond its self-containment checks (CI has
   no browser), and Codex `notify`. The list is in
   [docs/canvas.md](docs/canvas.md#what-is-tested-and-what-is-not).
+- **A wake-up has not started a session under a real harness in CI.** Whether
+  the listener decides right — off, declined, busy, the hourly cap, woke — and
+  what prompt it builds are the suite's business; that `claude -p` or
+  `codex exec` then behaves as a headless session should is the harness's
+  promise, checked by hand, not asserted here. The login item has not been
+  exercised on any platform in CI either.
 
 ## Things people reasonably worry about
 
@@ -74,6 +80,21 @@ six messages per hour per agent as a hard limit, an hourly token budget, `429`
 honoured with the platform's own `retry_after`, and a CI relay so one bot serves
 a whole project instead of one per agent. The caps sit far below both platforms'
 documented limits.
+
+**"A stranger can wake my machine and run an agent on it."** Only if you told
+it to. Wake-ups are off until the machine's owner runs `colab wake on`, and
+that is the only consent in the system: the ping's text is information to the
+agent, never an instruction, and the session it starts runs under your
+harness's normal permission settings, so a headless session declines anything
+you have not pre-allowed. From a browser only your owner link — printed once
+to you, never the room code — can flip the toggle; and the machine's own config
+is the authority, so `colab wake off` on the machine wins over anything the
+relay believes. What a wake-up cannot do is make a headless session safer than
+the permissions you gave it. **If a woken session does something you did not
+want, that is your harness's permission settings, not the ping**; tighten them
+before you turn wake back on. There is an hourly cap (four by default, sixty at
+most) because the cost of a wrong wake-up is a bill, and a cap is what stops a
+bill from compounding while you sleep.
 
 **"Chat content reaches third-party models."** True, and worth saying out loud
 rather than burying under the untrusted-input framing — that framing protects
@@ -117,9 +138,12 @@ State moves at session start, between prompts after a 180-second lull, when a
 session goes idle, and on `colab sync`. A message typically lands within a turn
 or two. If something is genuinely urgent, `--needs-reply` is the only mechanism
 that keeps it in front of somebody. The canvas is a live *view* — a transcript
-streams within a second of being written — but nothing typed on it reaches an
-agent before its next sync, and its role chip stays hollow until then to say
-so.
+streams within a second of being written — but nothing typed on it reaches a
+running session before its next sync, and its role chip stays hollow until then
+to say so. A wake-up is the one thing that moves faster, and only in one
+direction: a ping can start a *new* session on an idle machine whose owner
+turned wake-ups on. It cannot interrupt a session already running; that one
+sees the ping on its next turn, and the sender is told `busy`.
 
 **Enforcement is uneven across harnesses.** Claude Code gets a pre-edit hook, so
 a warning arrives *before* the write. Every other harness gets the MCP tools and
@@ -134,15 +158,39 @@ have nothing writable anywhere, you can read the board and publish nothing.
 caches and `.env` files are still shared between agents on one machine. Use
 worktrees or containers; they compose with this fine.
 
-**Chat and canvas inbound are polled, not pushed.** A message typed in `#ask`,
-or an ask or role from the canvas, is seen on the next sync beat. There is no
-gateway connection for chat, because that would need a process running between
-sessions. The canvas does run one — `colab canvas tail`, one detached daemon
-per session that streams the transcript *out* — but it exits on its own after
-thirty idle minutes, on `colab off`, and on the session-end hook, and it pulls
-nothing in; asks and roles still arrive through the hooks at sync time. A hook
+**Chat and canvas inbound are polled, not pushed — into a session.** A message
+typed in `#ask`, or a message or role from the canvas, is seen by a running
+session on the next sync beat. There is no gateway connection for chat, because
+that would need a process running between sessions. The canvas runs two, and
+neither changes this: `colab canvas tail`, one detached daemon per session that
+streams the transcript *out* — it exits on its own after thirty idle minutes,
+on `colab off`, and on the session-end hook, and pulls nothing in — and, only
+if the owner ran `colab wake on`, `colab wake serve`, one listener per profile
+that holds a connection to the room and starts a *new* session when a ping
+asks it to. Messages and roles still reach a running session through the hooks
+at sync time; `Stop` does not pull them, so an agent sitting idle sees a
+message at its next prompt, or when the listener wakes a fresh session. A hook
 killed at its timeout is a lost flush, never a lost event — the offset advances
 only on ack.
+
+**A wake-up needs the computer awake and the listener running.** A closed
+laptop, a sleeping desktop, or a machine rebooted since `colab wake on` has no
+listener connected, and a ping to it is acked `nobody`: the message waits in
+the inbox for the next session, and the page shows `wake: on · no listener`.
+The listener is an ordinary user process, so it needs a login item to survive
+a reboot — `colab wake on` can install one (`launchd` on macOS, `systemd
+--user` on Linux; Windows is handed the command to schedule). Without it, wake
+is on in the config and off in practice, which is the state most likely to be
+discovered at the worst moment. `colab wake status` says whether the listener
+is actually up.
+
+**The hourly cap is per machine and per relay, and neither is a budget.** Four
+wake-ups an hour by default (sixty at most) bounds how often a session can be
+started, not what a started session costs; one woken session that runs for an
+hour costs an hour. The relay counts on its clock and the listener on its own,
+either refusal is enough, and a ping past the cap is acked `busy · hourly cap`
+and left in the inbox. Raising the cap is the owner's call, from the owner link
+or the machine, and nowhere else.
 
 **Clock skew is not corrected.** Take resolution and lease expiry use wall-clock
 timestamps from each machine. A machine hours out of sync will resolve contested

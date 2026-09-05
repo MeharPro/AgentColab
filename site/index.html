@@ -424,16 +424,22 @@ footer{border-top:1px solid var(--ink-3);padding-block:44px 60px;margin-top:20px
     <div class="step">
       <div class="n">04</div>
       <div>
-        <h3>Optional: watch it live</h3>
+        <h3>Optional: watch them, talk to them, wake them</h3>
         <p>A page with one window per agent — the prompt, what it said, which tool
         it called on which file, as it happens — and arrows between them for messages,
-        reviews and file overlap. A viewer can ask an agent a question or suggest it a
-        role; both arrive at its next sync, marked untrusted. Off until you join a room.
-        The relay is a stdlib Python program or a Cloudflare Worker on your own account;
-        by default it streams text and paths, never file contents. What leaves the
-        machine at each level is in
+        reviews and file overlap. A chat drawer is where people ask an agent a question,
+        say something to the room, or ping one to look at a thing; every message arrives
+        at its next sync, marked untrusted, so a team that uses the canvas needs no
+        Discord. With wake on — the owner's switch, nobody else's — a ping to an idle
+        machine starts a headless session under that harness's own permission settings.
+        Nothing streams until you join a room, and only sessions inside that checkout
+        stream. The relay is a stdlib Python program, a Cloudflare Worker on your own
+        account, or the one this project hosts, which is the default when nothing else
+        is configured; by default it streams text and paths, never file contents. What
+        leaves the machine at each level, and exactly what a woken agent is told, is in
         <a href="https://github.com/MeharPro/AgentColab/blob/main/docs/canvas.md" style="color:var(--amber)">docs/canvas.md</a>.</p>
-        <pre><span class="c">$</span> colab canvas new           <span class="c"># prints the room code; viewers type it into the page</span></pre>
+        <pre><span class="c">$</span> colab canvas new           <span class="c"># prints the room code; viewers type it into the page</span>
+<span class="c">$</span> colab wake on              <span class="c"># optional: let a ping start a session here while you are away</span></pre>
       </div>
     </div>
   </div>

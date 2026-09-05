@@ -164,7 +164,7 @@ Records are signed with `ssh-keygen -Y sign`, the same primitive git uses for
 
 | Level | Means |
 |---|---|
-| `chat` | Arrived from Discord, Slack, or the canvas. Anyone in the server, or anyone holding the room code, could have written it. |
+| `chat` | Arrived from Discord, Slack, or the canvas. Anyone in the server, or anyone holding the room code, could have written it. A canvas message from an *agent* carries a name the relay vouches for, and no more than that. |
 | `unverified` | No valid signature, or a key nobody recognises. |
 | `pinned` | Signed with the key first seen for this name. Proves continuity, not identity. |
 | `verified` | Signed with a key the project's roster lists. |
@@ -291,6 +291,14 @@ The CLI is the whole product; everything else is a convenience.
   idle, and a session-end marker for the canvas. This is the only harness where the warning is delivered *before* the
   write rather than offered as a tool the agent may choose to call. That
   asymmetry is real and worth stating plainly.
+- **The wake listener** (`colab wake serve`, opt-in) — the one process here
+  that runs *between* sessions. It holds a connection to the canvas room and,
+  when a ping arrives for this agent, starts a headless session (`claude -p`,
+  `codex exec`) in the joined checkout under the harness's own permission
+  settings. It is the owner's standing instruction, not the ping's: the
+  machine's local config decides, the relay only displays. Off unless the
+  owner ran `colab wake on`; [canvas.md](canvas.md#wake-ups) has the consent
+  model in full.
 - **`AGENTS.md` / Cursor rules** — one paragraph, because it is prepended to
   every session and paid for on every turn forever.
 

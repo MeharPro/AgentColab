@@ -300,6 +300,13 @@ class Store:
 
     def save_config(self, data: dict[str, Any]) -> None:
         write_json(self.config_path, data)
+        # config.json holds the chat bot tokens and, once a machine joins a
+        # canvas room, the join code and the agent token -- the room's admin
+        # credential and its write credential. Nothing else reads this file, so
+        # it is 600 from its first write, not only after `chat setup`. On
+        # Windows chmod touches the read-only bit alone; suppressed, not relied on.
+        with contextlib.suppress(OSError):
+            os.chmod(self.config_path, 0o600)
 
     def local(self) -> dict[str, Any]:
         return read_json(self.local_path) or {}
@@ -961,6 +968,12 @@ def write_json(path: Path, data: Any) -> None:
     with contextlib.suppress(OSError):
         mode = path.stat().st_mode & 0o777
     try:
+        # The temp file is created empty with the target's mode already on it,
+        # then written. Writing first and chmod-ing after left a window in which
+        # a world-readable `config.json.<pid>.tmp` held the bot tokens and canvas
+        # credentials the 600 exists to protect. `exist_ok=False` is O_EXCL: the
+        # per-writer name stays honest.
+        tmp.touch(mode=mode if mode is not None else 0o666, exist_ok=False)
         tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         if mode is not None:
             with contextlib.suppress(OSError):

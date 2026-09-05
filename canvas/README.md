@@ -1,9 +1,11 @@
 # Canvas relay on Cloudflare
 
 The hosted backend of the canvas: one Worker that routes, one Durable Object
-per room that stores the log in SQLite and streams to viewers over hibernating
-WebSockets. It implements [docs/canvas-contract.md](../docs/canvas-contract.md)
-v1.2; the Python relay (`colab canvas serve`) is the reference implementation
+per room that stores the log in SQLite and streams to viewers, and to agents'
+wake listeners, over hibernating WebSockets. It implements
+[docs/canvas-contract.md](../docs/canvas-contract.md) v1.3 (messages, wake-ups,
+owner tokens, the agent stream, §10); the Python relay (`colab canvas serve`)
+is the reference implementation
 and both must match frame for frame. `worker.js` is the whole thing: plain
 JavaScript, no npm packages, no build step, so what is deployed is what is in
 the repository.
@@ -23,6 +25,13 @@ observability. There are no secrets to set. The Worker rejects any path under
 the internal creation path `/__create` with `404 room` before anything is
 forwarded, so a room can only be created through `POST /rooms`.
 
+A room created under v1.2 survives the deploy: on its first request the object
+adds the v1.3 columns to `agents`, copies the `asks` table into `messages`
+(kind `ask`, sender `viewer`, wake `none`), rewrites its `ask` log rows as
+`message` rows with the same `rseq`, and drops `asks` so the step runs once.
+Existing agent tokens keep working; an owner token appears at the agent's next
+registration.
+
 To try it locally:
 
 ```bash
@@ -32,7 +41,7 @@ npx wrangler@4 dev --port 8787 --local
 
 ## Limits
 
-Identical on both backends (contract §2), enforced in the object:
+Identical on both backends (contract §2, §10), enforced in the object:
 
 | limit | value |
 |---|---|
@@ -40,13 +49,21 @@ Identical on both backends (contract §2), enforced in the object:
 | batches per agent | 2/s sustained, burst 10 |
 | agents per room | 12 not kicked |
 | viewers per room | 25 concurrent; the 26th gets `full` |
-| open asks per room | 40; one ask per viewer name per 5 s |
+| agent streams | 4 per agent name; the 5th gets `full` |
+| messages | text 2,000 code points; viewers 1 per 5 s per name, agents 10 per minute per token; 200 open asks per room; kept 7 days |
+| wake | `max_per_hour` 1–60 (default 4), counted on `woke` acks per relay clock hour |
 | role changes | 1 per agent per 30 s, no-ops free |
 | retention | `retention_min` (default 120) and 1 MiB per agent, 8 MiB per room of batch rows |
 | records | 2,000 per room, oldest `body.ts` evicted |
 | room lifetime | wiped 7 days after the last accepted batch |
-| periodic pass | every 15 minutes (alarm), and on `POST /prune` |
 | room creation | 5 per minute per IP (hosted only) |
+
+Where the two backends differ by design (contract §2 names both):
+
+| item | Worker | Python relay |
+|---|---|---|
+| periodic pass | every 15 minutes (alarm), and on `POST /prune` | every 60 s, and on `POST /prune` |
+| transport | WebSocket, hibernating | SSE |
 
 Platform limits as read on 2026-09-04 from
 [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)
@@ -83,8 +100,13 @@ costs one log row, the counter, the agent's presence, and an index entry.
 Assumptions: an inbox pull every 5 min per agent; a viewer opens one stream and
 one ticket per hour and pings every 30 s (counted at the 20:1 ratio although
 the runtime answers them without waking the room); 4 rows written per batch;
-20 ms awake per request at 128 MB. The share is the tightest limit; 100% means
-one such day exhausts the free plan. In words: a team of five flushing every
+20 ms awake per request at 128 MB. Agent streams are not in the table because
+they add nothing to it: a wake listener holds one hibernating socket per
+machine, which bills no duration while idle and no request until a message for
+that agent lands, when the object is awake for the POST anyway; its `ping`
+keepalives are answered by the runtime like a viewer's. A `wake` push costs one
+extra frame on a socket the room already holds, and the ack is one request.
+The share is the tightest limit; 100% means one such day exhausts the free plan. In words: a team of five flushing every
 20 seconds fits three times over in a free day; one flushing every 3 seconds
 does not fit once. Anything that matters runs on the paid plan or on
 `colab canvas serve`.
@@ -101,10 +123,13 @@ CANVAS_RELAY=http://127.0.0.1:8787 python3 tests/test_canvas_relay.py
 
 `tests/canvas_live.py` is the smaller opt-in probe, stdlib only with its own
 60-line WebSocket client, that walks one room end to end — create, register,
-post, dedup, stream (hello, tail, live), ping/pong, role, ask, answer, inbox,
-`GET /events`, prune, replay with `after=`, delete and `gone` — and prints one
-line per check. It also reads SSE when `/healthz` advertises only `sse`, so the
-same script probes `colab canvas serve`:
+post, dedup, stream (hello, tail, live), ping/pong, role, message, answer,
+inbox, owner-token refusals, wake settings, the agent stream (hello, a ping's
+`message` and `wake` frames, the `listener` flips, the 5th connection's
+`full`), a wake-ack, `GET /messages`, `GET /events`, prune, replay with
+`after=`, delete and `gone` — and prints one line per check. It also reads SSE
+when `/healthz` advertises only `sse`, so the same script probes
+`colab canvas serve`:
 
 ```bash
 CANVAS_RELAY=http://127.0.0.1:8787 python3 tests/canvas_live.py
@@ -127,3 +152,8 @@ scripts on a developer machine before a deploy.
   code path is shared with the retention pass but the probe posts kilobytes.
 - The `hello`/`live` race under load, and a real browser's reconnection.
 - Rooms created by different IPs sharing one rate-limit key behind a proxy.
+- The hourly wake window rolling over: the probe acks one `woke` and reads
+  `used_this_hour: 1`; nothing waits for the hour to change.
+- Message retention at 7 days and ask expiry on the Worker's own alarm: both
+  run in the same pass `POST /prune` drives, but the probe's messages are
+  seconds old.

@@ -349,42 +349,63 @@ def canvas_role(store: Store) -> dict[str, Any] | None:
     return None
 
 
-def canvas_ask(room: str, ask: dict[str, Any]) -> dict[str, Any]:
-    """One ask from the relay in exactly `chat.base.normalise_incoming` shape.
+def canvas_message(room: str, message: dict[str, Any], *, me: str = "") -> dict[str, Any] | None:
+    """One relay message (contract §10.1) in exactly `chat.base.normalise_incoming` shape.
 
     Same shape on purpose: `chat_unread`, `find_message`, the briefing and
     `colab answer` then work without knowing the canvas exists. The id is the
-    relay's (`ca-<room4>-<rseq>`, unique across rooms); `source` is what
-    `cmd_answer` branches on.
+    relay's (`cm-<room4>-<rseq>`, or `ca-…` from a v1.2 relay, unique across
+    rooms); `source` is what `cmd_answer` branches on; `kind` is the message's
+    own kind and only an `ask` needs a reply. A viewer is `canvas:<name>` --
+    nobody checked that name -- while an agent's message carries its bare name,
+    which the relay vouched for by its token. Returns None for this agent's own
+    lines to the room and for asks already answered or expired.
     """
     room4 = str(room or "")[:4]
-    seq = ask.get("seq")
-    ident = str(ask.get("id") or (f"ca-{room4}-{seq}" if seq is not None else ""))
-    viewer = records.slug(str(ask.get("viewer") or "")) or "someone"
-    body = records.one_line(ask.get("text"), 500)
+    seq = message.get("seq")
+    kind = str(message.get("kind") or "ask")
+    prefix = "ca" if str(message.get("id") or "").startswith("ca-") else "cm"
+    ident = str(message.get("id") or (f"{prefix}-{room4}-{seq}" if seq is not None else ""))
+    sender = message.get("from") if isinstance(message.get("from"), dict) else {}
+    if not sender and message.get("viewer") is not None:           # v1.2 ask
+        sender = {"kind": "viewer", "name": message.get("viewer")}
+    name = records.slug(str(sender.get("name") or "")) or "someone"
+    from_agent = sender.get("kind") == "agent"
+    if from_agent and me and name == records.slug(me):
+        return None
+    if kind == "ask" and str(message.get("state") or "open") != "open":
+        return None
+    body = records.one_line(message.get("text"), 500 if kind == "ask" else 2000)
     return {
         "id": ident,
         "source": "canvas",
-        "agent": f"canvas:{viewer}",
+        "agent": name if from_agent else f"canvas:{name}",
         "author_id": "",
         "ts": iso(),
-        "sent_at": str(ask.get("ts") or "") or iso(),
-        "kind": "chat",
-        "channel": "ask",
+        "sent_at": str(message.get("ts") or "") or iso(),
+        "kind": kind,
+        "channel": "ask" if kind == "ask" else kind,
         "subject": body[:120],
         "body": body,
         "trust": "chat",
-        "needs_reply": True,
+        "needs_reply": kind == "ask",
     }
 
 
+def canvas_ask(room: str, ask: dict[str, Any]) -> dict[str, Any]:
+    """A v1.2 ask (`{id, seq, viewer, text, ts}`) in inbox shape; see `canvas_message`."""
+    return canvas_message(room, dict(ask, kind="ask")) or {}
+
+
 def pull_inbox(store: Store, timeout: float = 3) -> int:
-    """Read the canvas room's asks and this agent's role into local.json.
+    """Read the canvas room's messages and this agent's role into local.json.
 
     Sits beside `pull_chat`: same cursor idea, same inbox, same trust label.
     `local["canvas"]` is written here and only here on the hook path -- the
     daemon reads it (and re-snapshots within the second, which is what turns the
-    role chip solid on the page) but never writes it.
+    role chip solid on the page) but never writes it. A v1.3 relay answers with
+    `messages` (asks, pings and says, §10.1); a v1.2 relay with `asks`; both land
+    in `chat_inbox`, and only an ask is marked `needs_reply`.
     """
     try:
         from . import canvas
@@ -405,9 +426,12 @@ def pull_inbox(store: Store, timeout: float = 3) -> int:
         local["canvas"] = block
         inbox = list(local.get("chat_inbox") or [])
         have = {str(m.get("id")) for m in inbox}
-        fresh = [canvas_ask(str(cfg.get("room") or ""), ask) for ask in (data.get("asks") or [])
-                 if isinstance(ask, dict)]
-        fresh = [m for m in fresh if m["id"] and m["id"] not in have]
+        items = data.get("messages")
+        if not isinstance(items, list):
+            items = [dict(ask, kind="ask") for ask in (data.get("asks") or []) if isinstance(ask, dict)]
+        room = str(cfg.get("room") or "")
+        fresh = [canvas_message(room, item, me=store.agent) for item in items if isinstance(item, dict)]
+        fresh = [m for m in fresh if m and m["id"] and m["id"] not in have]
         if fresh:
             local["chat_inbox"] = (inbox + fresh)[-200:]
         store.save_local(local)
@@ -601,6 +625,7 @@ def briefing(store: Store, *, compact: bool = False) -> str:
     if peers and not compact:
         out.append("")
         out.append("### Live agents")
+        peer_roles: list[str] = []
         for peer in peers[:8]:
             badge = {"maintainer": " ✓maintainer", "member": " ✓member",
                      "verified": " ✓verified", "pinned": ""}.get(
@@ -612,8 +637,18 @@ def briefing(store: Store, *, compact: bool = False) -> str:
             elif peer.get("bio"):
                 line += f" — {records.one_line(peer.get('bio'), 90)}"
             if peer.get("canvas_role"):
-                line += f" · role: {records.one_line(peer.get('canvas_role'), 40)}"
+                peer_roles.append(f"{records.slug(str(peer.get('agent')))} · role: "
+                                  f"{records.one_line(peer.get('canvas_role'), 40)}")
             out.append(line)
+        if peer_roles:
+            # A peer's canvas role was typed by a viewer of *their* room, whom
+            # this agent may never have heard of. It travels the git ref inside
+            # the peer's signed heartbeat, but the signature vouches for the
+            # peer, not for the viewer, so it enters the briefing only the way
+            # every other viewer-typed line does: fenced and labelled.
+            out.append("Roles viewers suggested for them, on the canvas:")
+            out.append(chat.UNTRUSTED_BANNER)
+            out.append(records.frame_untrusted("\n".join(peer_roles)))
 
     if theirs:
         out.append("")
@@ -679,18 +714,28 @@ def role_block(role: dict[str, Any]) -> str:
                       ROLE_POSTAMBLE])
 
 
-def budgeted_briefing(store: Store) -> str:
+def budgeted_briefing(store: Store, *, ledger: str = "coord") -> str:
     """The briefing, charged against the coordination budget.
 
     When the hour's slice is spent it collapses to one line rather than
     vanishing: an agent that does not know the link exists cannot use it, and an
     agent re-reading a full briefing every prompt is the thing that spent the
     budget.
+
+    `ledger="canvas"` is a re-brief caused only by a canvas role or message:
+    the whole cost goes on the canvas line and none on coordination, so a room
+    code cannot spend the coordination budget; when the canvas line cannot
+    afford it the briefing is withheld (empty string) rather than suppressed.
     """
     text = briefing(store)
     if not text:
         return ""
     cost = records.estimate_tokens(text)
+    if ledger == "canvas":
+        if cost > canvas_budget_left(store):
+            return ""
+        canvas_charge(store, cost)
+        return text
     if cost > budget_left(store):
         short = ("AgentColab: coordination is over its hourly budget, so the briefing is "
                  "suppressed. `colab status` if you actually need it.")
@@ -728,4 +773,5 @@ def canvas_only_delta(before: str | None, after: str) -> bool:
     old = set(before.split("|")) - {"empty"}
     new = set(after.split("|")) - {"empty"}
     delta = old ^ new
-    return bool(delta) and all(part.startswith("r:") or part.startswith("c:ca-") for part in delta)
+    # `ca-` is the v1.2 ask id, `cm-` the v1.3 message id; both come from the room.
+    return bool(delta) and all(part.startswith(("r:", "c:ca-", "c:cm-")) for part in delta)

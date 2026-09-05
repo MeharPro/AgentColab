@@ -159,8 +159,9 @@ colab  › fable-arch has src/checkout.py claimed (critical) — rewriting the
          Nobody else is in there.
 ```
 
-Discord is the default. Slack ships in the box. The adapter is an interface, so
-adding another is one file.
+Discord is the default chat platform. Slack ships in the box. The adapter is an
+interface, so adding another is one file. And if your team uses the canvas
+below, chat is optional altogether: the room is the canvas.
 
 **Chat is a mirror, not the transport.** Coordination state lives on a git ref;
 nothing is stored in or read back from a chat platform, no code or files cross a
@@ -169,26 +170,46 @@ runs with chat switched off — that is how the test suite runs it. Details, and
 the platform limits that follow from it, are in
 [docs/chat.md](docs/chat.md#chat-is-not-the-transport).
 
-### Watch it live
+### Watch them, talk to them, wake them
 
 ```bash
 colab canvas new            # a room; prints the room code and, once, the join code
 colab canvas export         # writes the public half into .agentcolab/agentcolab.json
+colab canvas join <code>    # on each teammate's machine: this agent's sessions now stream
 ```
 
 Open the relay's page, type the room code, and every agent that has joined the
 room is a window: the prompt it was given, what it said, which tool it called on
 which file, ticking as it happens — with arrows between windows for messages,
-reviews, blocked tasks and file overlap. A viewer can ask one agent a question
-or suggest it a role; both reach that agent at its next sync, marked untrusted,
-exactly like a question typed in `#ask`.
+reviews, blocked tasks and file overlap. Switch to *desktop* to see one agent
+the way its own app draws it, or *cli* to see its terminal.
 
-The canvas is a mirror too. It is off until you join a room, the transcript on
-disk is the only copy that matters, and the relay forgets within hours. By
-default it streams the model's text and tool calls with paths, never file
-contents. Run the relay on Cloudflare's free tier or with `colab canvas serve`
-on a host you own. What leaves the machine at each level, and what a leaked
-room code exposes, are in [docs/canvas.md](docs/canvas.md).
+A chat drawer beside the windows is where people talk to the agents: ask one a
+question, say something to the room, or ping one to look at a thing. Every
+message reaches the agent at its next sync, marked untrusted, exactly like a
+question typed in `#ask` — which is why **Discord is now optional.** The room
+is the canvas.
+
+```bash
+colab wake on                                   # your standing instruction: pings may start a session here
+colab ping bob-codex "main is red — the Windows test; yours?"
+```
+
+With wake on, a ping to an idle machine starts a headless session in the joined
+checkout, under that harness's normal permission settings — so it declines
+anything its owner has not pre-allowed. Turning wake on is the owner's decision
+and only the owner can flip it; the ping's text is information to the agent,
+never an instruction. At most four an hour by default.
+
+The canvas is a mirror too. Nothing streams until you join a room, and a
+machine streams only sessions started inside the checkout it joined — never
+every Claude or Codex session on the computer. The transcript on disk is the
+only copy that matters, and the relay forgets within hours. By default it
+streams the model's text and tool calls with paths, never file contents. Run
+the relay on Cloudflare's free tier or with `colab canvas serve` on a host you
+own. What leaves the machine at each level, what a leaked room code or owner
+link exposes, and exactly what a woken agent is told, are in
+[docs/canvas.md](docs/canvas.md).
 
 ---
 
@@ -401,7 +422,9 @@ Stated here rather than discovered later. The long version is
 - **Coordination is not real-time.** An agent session cannot hold a socket
   open. State moves at session start, between prompts after a lull, when a
   session goes idle, and on `colab sync`. The canvas is a live *view*, and
-  nothing typed on it reaches an agent before its next sync.
+  nothing typed on it reaches a running session before its next sync. The one
+  exception is a wake-up: a ping can start a *new* session on an idle machine,
+  and only because that machine's owner turned it on.
 - **It does not isolate anything.** Ports, databases, Docker daemons and caches
   are still shared. Use worktrees or containers for that; they compose fine.
 
@@ -419,6 +442,8 @@ written to be read by an agent as much as by a person.
 python3 tests/test_units.py              # 45 tests, no network, no git
 bash tests/test_e2e.sh                   # 46 assertions, incl. a real cross-machine race
 python3 tests/test_chat_integration.py   # 30 assertions against a local Discord/Slack
+python3 tests/test_canvas.py             # the canvas client: tailers, sanitising, daemon, wake listener
+python3 tests/test_canvas_relay.py       # the relay contract, against the stdlib relay
 python3 tests/check_stdlib_only.py       # zero-dependency guard
 ```
 
@@ -436,7 +461,7 @@ cannot reproduce one, that is a bug — please file it.
 | [docs/architecture.md](docs/architecture.md) | Transport, records, trust, and why each choice |
 | [docs/protocol.md](docs/protocol.md) | ColabWire, and the honest token-efficiency argument |
 | [docs/chat.md](docs/chat.md) | Discord and Slack setup, channel map, writing an adapter |
-| [docs/canvas.md](docs/canvas.md) | The live canvas: what leaves the machine, the three credentials, hosting the relay |
+| [docs/canvas.md](docs/canvas.md) | The live canvas: what leaves the machine, the four credentials, messages and wake-ups, hosting the relay |
 | [docs/security.md](docs/security.md) | Threat model, defenses, and what cannot be defended |
 | [docs/comparison.md](docs/comparison.md) | What else exists and where this differs |
 | [FAILURE-MODES.md](FAILURE-MODES.md) | Everything known to be wrong or missing |

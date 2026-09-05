@@ -472,6 +472,17 @@ def sanitise(event: dict[str, Any], level: str, repo_root: Path | None) -> dict[
     def withhold(text: str) -> str:
         return records.withhold_secrets(text) if records.looks_like_secret(text) else text
     body = _map_strings(body, withhold)
+    # Scrubbing grows strings (`Bearer abcd1234` becomes `Bearer
+    # [REDACTED:auth-header]`), so a body cut to exactly its cap can leave here
+    # over it and be refused by the relay as `policy` or `oversize`. The gate
+    # runs again after the scrub; both cuts are no-ops when nothing grew.
+    if kind == "prompt" and level == "summary":
+        text, cut = _cut_points(str(body.get("text") or ""), SUMMARY_PROMPT_CHARS, SUMMARY_PROMPT_BYTES)
+        if cut:
+            body["truncated"] = True
+            body.setdefault("bytes", len(str(body.get("text") or "").encode("utf-8")))
+        body["text"] = text
+    body = _fit(body, CAPS.get(kind, EVENT_BYTES))
     body = _policy(kind, body, level)
     if body is None:
         return None
@@ -492,8 +503,28 @@ def effective_level(config_level: str | None, project_max: str | None = None,
 
 
 def lower_level(level: str) -> str:
+    """One step down, never below `summary`.
+
+    A policy rejection means the room's ceiling is lower than this machine
+    thought, and `summary` is the floor a ceiling can have (§3.1). Dropping to
+    `off` here silently ended the mirror for the rest of the daemon's life while
+    `colab canvas status` kept saying it was streaming.
+    """
     index = LEVELS.index(level) if level in LEVELS else 1
-    return LEVELS[max(0, index - 1)]
+    return LEVELS[max(1, index - 1)]
+
+
+def clamp_stream(requested: str | None, reply: Any) -> str:
+    """The level this machine streams at: min of what it asked for and what the relay answered.
+
+    Computed here, never copied from the relay: `effective_stream` can only be
+    the requested level or lower (§3.6), so a reply above it is a relay lying,
+    and a lie must not open the widest pipe in the project.
+    """
+    wanted = requested if requested in LEVELS and requested != "off" else "tools"
+    if isinstance(reply, str) and reply in LEVELS and reply != "off":
+        return LEVELS[min(LEVELS.index(wanted), LEVELS.index(reply))]
+    return wanted
 
 
 # ---------------------------------------------------------------- tailers
@@ -519,9 +550,15 @@ def _text_of(content: Any) -> tuple[str, bool, str]:
             continue
         if block.get("type") in ("text", "input_text", "output_text") and isinstance(block.get("text"), str):
             parts.append(block["text"])
-        elif block.get("type") == "image":
+        elif block.get("type") in ("image", "input_image", "output_image"):
+            # Claude carries `source.media_type`; Codex carries a data URI in
+            # `image_url`. Neither's bytes are copied -- only that one was there.
             image = True
-            media = media or str((block.get("source") or {}).get("media_type") or "")
+            source = block.get("source") if isinstance(block.get("source"), dict) else {}
+            media = media or str(source.get("media_type") or block.get("media_type") or "")
+            url = block.get("image_url")
+            if not media and isinstance(url, str) and url.startswith("data:"):
+                media = url[len("data:"):].split(";", 1)[0].split(",", 1)[0]
     return "\n".join(parts), image, media
 
 
@@ -569,11 +606,19 @@ class _Tailer:
         # The caller's dict is kept, not copied: `Offsets` hands one in and
         # expects `ack()` to move it.
         self.state = state if isinstance(state, dict) else {}
-        for key in ("offset", "inode", "epoch", "seq", "acked_seq"):
+        for key in ("offset", "inode", "epoch", "seq", "acked_seq", "line"):
             value = self.state.get(key)
             self.state[key] = int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
         self.read_to = self.state["offset"]
-        self.line = self.state["seq"] >> 8
+        # The physical line number is persisted on its own. Restoring it from
+        # `seq >> 8` looked equivalent and was not: `seq` is the highest seq
+        # *emitted*, and trailing lines that emit nothing (Claude `attachment`,
+        # `queue-operation`; Codex `token_count`) are invisible to it, so a
+        # restored tailer numbered the next line short by that many and its ids
+        # and seqs disagreed with the daemon that read the same file live. An
+        # offsets file from before this field carries no `line`; `seq >> 8` is
+        # then the best available guess rather than a silent zero.
+        self.line = self.state["line"] if self.state["line"] else self.state["seq"] >> 8
         self.seq = self.state["seq"]
         self.epoch = self.state["epoch"]
         self.partial = bytearray()
@@ -732,7 +777,7 @@ class _Tailer:
         if self.unacked:
             return False
         self.state.update({"offset": self.read_to, "epoch": self.epoch,
-                           "seq": self.seq, "acked_seq": self.seq})
+                           "seq": self.seq, "acked_seq": self.seq, "line": self.line})
         return True
 
 
@@ -1016,6 +1061,11 @@ def derive_state(lane_events: list[dict[str, Any]], *, idle_marker: bool = False
                 return "tool", {"name": str(b.get("name") or ""), "ref": event["ref"],
                                 "since": event.get("ts")}
             break
+    if idle_marker:
+        # The Stop hook has said the turn is over. The transcript alone cannot:
+        # a turn that ended on `stop_sequence` leaves a non-final `text` as its
+        # newest block, which reads `working` for the whole idle timeout.
+        return "idle", None
     kind = newest.get("kind")
     if kind == "text" and not body.get("final"):
         return "working", None
@@ -1064,6 +1114,9 @@ def snapshot(store: Store, *, state: str, tool: dict[str, Any] | None = None,
     body["stream"] = level
     body["alive"] = alive
     body["daemon"] = daemon or {"state": "running", "reason": None}
+    # The machine's own wake settings (§10.7): the relay's copy is what the
+    # page shows, this is what the listener will actually do.
+    body["wake"] = wake_settings(store)
     return build("agent", body, session=session, lane=lane, seq=seq, epoch=epoch,
                  harness=harness or str(heartbeat.get("harness") or ""),
                  model=model or (str(heartbeat.get("model") or "") or None), agent=agent)
@@ -1238,7 +1291,10 @@ def new_room(relay: str, name: str = "room", policy: dict[str, Any] | None = Non
 def register(relay: str, join_code: str, name: str, *, harness: str | None = None,
              human: str | None = None, model: str | None = None, stream: str = "tools",
              timeout: float = 5) -> dict[str, Any]:
-    """POST /agents/{name} with the join code → {token, policy, effective_stream, rseq}."""
+    """POST /agents/{name} with the join code → {token, owner_token, policy, effective_stream, rseq}.
+
+    `owner_token` (§10.2) is present on a v1.3 relay and `None` on an older one.
+    """
     room = _room_of(join_code)
     body = {"harness": harness, "human": human, "model": model, "stream": stream}
     status, _, raw = _request("POST", _url(relay, f"/r/{room}/agents/{urllib.parse.quote(name)}"),
@@ -1247,12 +1303,78 @@ def register(relay: str, join_code: str, name: str, *, harness: str | None = Non
     if status != 200:
         raise RuntimeError(f"relay refused registration ({status}): {data.get('hint') or raw[:200]!r}")
     data["room"] = room
+    owner = data.get("owner_token")
+    data["owner_token"] = owner if isinstance(owner, str) and owner.startswith("ot-") else None
     return data
+
+
+def owner_link(relay: str, room: str, owner_token: str) -> str:
+    """`<relay>/#<room>/o=<owner token>` (§10.2): the page reads `o=` and rewrites the URL at once."""
+    return f"{str(relay or '').rstrip('/')}/#{room}/o={owner_token}"
+
+
+def post_message(relay: str, room: str, token: str, *, to: str, text: str, kind: str | None = None,
+                 wake: bool = False, viewer: str | None = None, timeout: float = 3) -> dict[str, Any]:
+    """POST /messages (§10.1) → {id, seq}. Raises on anything but 201.
+
+    With an agent token `from` is the token's name; `viewer` is only for the
+    room-code form, which the CLI never uses.
+    """
+    body: dict[str, Any] = {"to": to, "text": text}
+    if kind:
+        body["kind"] = kind
+    if wake:
+        body["wake"] = True
+    if viewer:
+        body["viewer"] = viewer
+    status, _, raw = _request("POST", _url(relay, f"/r/{room}/messages"),
+                              data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                              token=token, timeout=timeout)
+    data = _json_body(raw)
+    if status != 201:
+        raise RuntimeError(f"relay refused the message ({status}): {data.get('hint') or raw[:200]!r}")
+    return data
+
+
+def wake_ack(relay: str, room: str, token: str, message_id: str, result: str,
+             reason: str | None = None, *, timeout: float = 3) -> bool:
+    """POST /wake-ack (§10.4). True on 200; never raises."""
+    body = {"message": message_id, "result": result,
+            "reason": records.one_line(reason, 200)[1:-1] if reason else None}
+    with contextlib.suppress(Exception):
+        status, _, _ = _request("POST", _url(relay, f"/r/{room}/wake-ack"),
+                                data=json.dumps(body).encode("utf-8"), token=token, timeout=timeout)
+        return status == 200
+    return False
+
+
+def put_wake(relay: str, room: str, token: str, name: str, settings: dict[str, Any], *,
+             timeout: float = 3) -> dict[str, Any] | None:
+    """PUT /agents/{name}/wake (§10.3) with the agent or owner token → the relay's wake object, or None."""
+    body = {k: settings[k] for k in ("enabled", "from", "max_per_hour") if k in settings}
+    with contextlib.suppress(Exception):
+        status, _, raw = _request("PUT", _url(relay, f"/r/{room}/agents/{urllib.parse.quote(name)}/wake"),
+                                  data=json.dumps(body).encode("utf-8"), token=token, timeout=timeout)
+        if status == 200:
+            wake = _json_body(raw).get("wake")
+            return wake if isinstance(wake, dict) else {}
+    return None
+
+
+def agent_stream_url(relay: str, room: str, *, websocket: bool = False) -> str:
+    """GET /agent-stream (§10.5); `ws(s)://` for the WebSocket form."""
+    url = _url(relay, f"/r/{room}/agent-stream")
+    if websocket:
+        url = "ws" + url[len("http"):] if url.startswith("http") else url
+    return url
 
 
 def pull_inbox_raw(relay: str, room: str, token: str, after: int = 0, *,
                    timeout: float = 3) -> dict[str, Any]:
-    """GET /inbox?after=N → {rseq, role, asks}. Raises on anything but 200."""
+    """GET /inbox?after=N → {rseq, role, messages} (v1.3) or {rseq, role, asks} (v1.2).
+
+    Raises on anything but 200.
+    """
     status, _, raw = _request("GET", _url(relay, f"/r/{room}/inbox?after={int(after)}"),
                               token=token, timeout=timeout)
     data = _json_body(raw)
@@ -1321,13 +1443,25 @@ class Poster:
     def _defer(self, seconds: float) -> None:
         self.retry_after = self.clock() + max(0.0, min(float(seconds), RETRY_MAX))
 
-    def send(self, events: list[dict[str, Any]], gaps: list[dict[str, Any]] | None = None) -> set[str]:
+    def send(self, events: list[dict[str, Any]], gaps: list[dict[str, Any]] | None = None, *,
+             deadline: float | None = None) -> set[str]:
+        """Post `events` in wire batches; `deadline` (a `time.monotonic()` instant) stops
+        the loop between batches and caps each request's timeout, for the hook path."""
         acked: set[str] = set()
         if not self.ready():
             return acked
-        for batch in batches(events):
-            if not self._send_batch(batch, acked, gaps if gaps is not None else []):
-                break
+        base_timeout = self.timeout
+        try:
+            for batch in batches(events):
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining < 0.3:
+                        break
+                    self.timeout = min(base_timeout, remaining)
+                if not self._send_batch(batch, acked, gaps if gaps is not None else []):
+                    break
+        finally:
+            self.timeout = base_timeout
         return acked
 
     def _send_batch(self, batch: list[tuple[dict[str, Any], str]], acked: set[str],
@@ -1434,6 +1568,41 @@ def is_on(store: Store) -> bool:
     return bool(canvas.get("relay") and canvas.get("room") and canvas.get("token"))
 
 
+# The machine's half of §10.3: what its listener will do about a wake, whatever
+# the relay displays. `from` has no `anyone`; the room code is the outer wall.
+WAKE_DEFAULTS: dict[str, Any] = {"enabled": False, "from": "agents", "max_per_hour": 4}
+WAKE_FROM = ("agents", "room")
+
+
+def wake_settings(store: Store) -> dict[str, Any]:
+    """`config["canvas"]["wake"]` with defaults filled and every value validated."""
+    raw: Any = {}
+    with contextlib.suppress(Exception):
+        block = store.config().get("canvas")
+        raw = block.get("wake") if isinstance(block, dict) else {}
+    raw = raw if isinstance(raw, dict) else {}
+    per_hour = raw.get("max_per_hour")
+    if not isinstance(per_hour, int) or isinstance(per_hour, bool) or not 1 <= per_hour <= 60:
+        per_hour = WAKE_DEFAULTS["max_per_hour"]
+    return {"enabled": bool(raw.get("enabled", False)),
+            "from": raw["from"] if raw.get("from") in WAKE_FROM else WAKE_DEFAULTS["from"],
+            "max_per_hour": per_hour}
+
+
+def save_wake_settings(store: Store, **changes: Any) -> dict[str, Any]:
+    """Write `enabled` / `from` / `max_per_hour` into config; returns the settings in force."""
+    config = store.config()
+    block = dict(config.get("canvas") or {}) if isinstance(config.get("canvas"), dict) else {}
+    wake = dict(block.get("wake") or {}) if isinstance(block.get("wake"), dict) else {}
+    for key, value in changes.items():
+        if key in WAKE_DEFAULTS and value is not None:
+            wake[key] = value
+    block["wake"] = wake
+    config["canvas"] = block
+    store.save_config(config)
+    return wake_settings(store)
+
+
 def markers_dir(store: Store) -> Path:
     path = store.home / "canvas"
     path.mkdir(parents=True, exist_ok=True)
@@ -1480,16 +1649,22 @@ class Offsets:
         self.transcripts: dict[str, dict[str, Any]] = dict(data.get("transcripts") or {})
         self.seen: dict[str, str] = dict((data.get("records") or {}).get("seen") or {})
         self.retry_after: str | None = data.get("retry_after") or None
+        # The hook path builds a fresh Poster per invocation, so the "three
+        # 401/404s and the room is gone" rule (§7) has to count across
+        # invocations or it never fires there.
+        failures = data.get("auth_failures")
+        self.auth_failures: int = int(failures) if isinstance(failures, int) and not isinstance(failures, bool) else 0
 
     def state_for(self, path: Path | str) -> dict[str, Any]:
-        return self.transcripts.setdefault(str(path), {"offset": 0, "inode": 0, "epoch": 0, "seq": 0, "acked_seq": 0})
+        return self.transcripts.setdefault(str(path), {"offset": 0, "inode": 0, "epoch": 0, "seq": 0,
+                                                       "acked_seq": 0, "line": 0})
 
     def save(self) -> None:
         self.transcripts = {p: s for p, s in self.transcripts.items() if Path(p).exists()}
         if len(self.seen) > 2000:
             self.seen = dict(list(self.seen.items())[-2000:])
         write_json(self.path, {"transcripts": self.transcripts, "records": {"seen": self.seen},
-                               "retry_after": self.retry_after})
+                               "retry_after": self.retry_after, "auth_failures": self.auth_failures})
 
 
 def _pending_path(store: Store, sid: str) -> Path:
@@ -1524,7 +1699,12 @@ def read_pending(store: Store, sid: str) -> tuple[bytes, list[dict[str, Any]]]:
     except OSError:
         return b"", []
     events = []
-    for line in data.decode("utf-8", "replace").splitlines():
+    # Split on the byte the writer used. `str.splitlines()` also breaks on
+    # U+2028/U+2029/U+0085, which `sanitise` lets through and `ensure_ascii=False`
+    # writes raw, so an answer containing one was cut into two unparsable halves
+    # and silently consumed with the rest of the file.
+    for raw in data.split(b"\n"):
+        line = raw.decode("utf-8", "replace")
         if not line.strip():
             continue
         with contextlib.suppress(ValueError):
@@ -1560,7 +1740,10 @@ def _first_cwd(path: Path) -> str | None:
     """The `cwd` in the first entries of a transcript, for the lossy slug's sake."""
     with contextlib.suppress(OSError):
         with open(path, "rb") as handle:
-            for _ in range(12):
+            # A transcript can open with a run of `queue-operation` lines that
+            # carry no `cwd`; the first `user` entry does. Forty lines is far
+            # past that in every transcript on this machine.
+            for _ in range(40):
                 line = handle.readline(CHUNK * 4)
                 if not line:
                     break
@@ -1580,36 +1763,72 @@ def _first_cwd(path: Path) -> str | None:
     return None
 
 
-def _same_dir(a: str | None, b: Path | str) -> bool:
-    if not a:
+def _beneath(inside: str | None, repo_root: Path | str) -> bool:
+    """Is `inside` the checkout, or a directory under it? (Contract §10.7, scope.)
+
+    Resolved on both sides so a symlinked checkout and its real path agree;
+    compared by path parts, not string prefix, so `/repo-2` is not under `/repo`.
+    """
+    if not inside:
         return False
+    try:
+        candidate = Path(inside).resolve()
+        root = Path(repo_root).resolve()
+    except OSError:
+        return False
+    return candidate == root or root in candidate.parents
+
+
+def _project_dirs_for(repo_root: Path | str) -> list[Path]:
+    """Every `~/.claude/projects/<slug>` that could hold a session of this checkout.
+
+    Claude Code slugs the directory a session was *started in*, so a session
+    begun in `repo/sub` lives under `<root slug>-sub`, beside the root's own.
+    The slug is lossy (`-` stands for `/`, `.`, `_` and every other symbol), so
+    a prefix match is only a candidate list: each transcript's `cwd` decides.
+    """
+    root_dir = claude_project_dir(repo_root)
+    prefix = root_dir.name + "-"
+    out = []
     with contextlib.suppress(OSError):
-        return Path(a).resolve() == Path(b).resolve()
-    return str(a).rstrip("/") == str(b).rstrip("/")
+        for path in sorted(CLAUDE_PROJECTS.iterdir()):
+            if path.is_dir() and (path.name == root_dir.name or path.name.startswith(prefix)):
+                out.append(path)
+    return out
 
 
-def discover_claude_transcripts(cwd: Path | str, hours: float = 6) -> list[tuple[str, Path]]:
-    """(session id, path) for every recent Claude Code transcript of this checkout, newest first."""
-    directory = claude_project_dir(cwd)
-    if not directory.is_dir():
-        return []
+def discover_claude_transcripts(repo_root: Path | str, hours: float = 6) -> list[tuple[str, Path]]:
+    """(session id, path) for every recent Claude Code transcript started inside this checkout.
+
+    Newest first. A transcript is kept when its `cwd` (the first entries that
+    carry one) is the repository root or a directory beneath it; a transcript
+    with no `cwd` at all is kept only when it sits in the root's own project
+    directory, because the slug cannot tell a subdirectory from a sibling. A
+    session from another checkout is never tailed, however new it is, and there
+    is no fallback to the newest file.
+    """
     cutoff = time.time() - hours * 3600
+    exact = claude_project_dir(repo_root)
     found = []
-    for path in directory.glob("*.jsonl"):
-        with contextlib.suppress(OSError):
-            mtime = path.stat().st_mtime
-            if mtime < cutoff:
-                continue
-            inside = _first_cwd(path)
-            if inside and not _same_dir(inside, cwd):
-                continue
-            found.append((mtime, path.stem, path))
+    for directory in _project_dirs_for(repo_root):
+        for path in directory.glob("*.jsonl"):
+            with contextlib.suppress(OSError):
+                mtime = path.stat().st_mtime
+                if mtime < cutoff:
+                    continue
+                inside = _first_cwd(path)
+                if inside:
+                    if not _beneath(inside, repo_root):
+                        continue
+                elif directory != exact:
+                    continue
+                found.append((mtime, path.stem, path))
     found.sort(reverse=True)
     return [(sid, path) for _, sid, path in found]
 
 
-def discover_rollouts(cwd: Path | str, hours: float = 6) -> list[tuple[str, Path]]:
-    """(thread id, path) for recent Codex rollouts whose line 1 names this checkout."""
+def discover_rollouts(repo_root: Path | str, hours: float = 6) -> list[tuple[str, Path]]:
+    """(thread id, path) for recent Codex rollouts whose `session_meta.payload.cwd` is inside this checkout."""
     cutoff = time.time() - hours * 3600
     days = []
     for back in (0, 1):
@@ -1624,7 +1843,7 @@ def discover_rollouts(cwd: Path | str, hours: float = 6) -> list[tuple[str, Path
                 mtime = path.stat().st_mtime
                 if mtime < cutoff:
                     continue
-                if not _same_dir(_first_cwd(path), cwd):
+                if not _beneath(_first_cwd(path), repo_root):
                     continue
                 found.append((mtime, _rollout_thread(path), path))
     found.sort(reverse=True)
@@ -1740,13 +1959,45 @@ def daemon_states(store: Store) -> list[dict[str, Any]]:
 
 
 def stop_daemons(store: Store) -> int:
-    """Write a stop marker for every live tailer; they exit on their next tick."""
+    """Write a stop marker for every live tailer; they exit on their next tick.
+
+    The wake listener (`colab wake serve`) counts as one of them: `colab off`
+    and `colab canvas off` mean nothing of ours keeps a socket to the relay.
+    """
     count = 0
     for row in daemon_states(store):
         if row["state"] == "running":
             write_stop_marker(store, row["sid"])
             count += 1
+    if stop_listener(store):
+        count += 1
     return count
+
+
+WAKE_PIDFILE = "wake.pid"
+WAKE_STOP = "wake-stop"
+
+
+def listener_pid(store: Store) -> int:
+    """The live listener's pid, or 0."""
+    pid = _read_pid(_marker(store, WAKE_PIDFILE))
+    return pid if pid and _pid_alive(pid) else 0
+
+
+def stop_listener(store: Store) -> bool:
+    """Ask the wake listener to exit: a marker it polls, plus SIGTERM where there is one.
+
+    The marker alone would do, but the listener sits in a socket read for up
+    to its keepalive interval, and `colab off` should mean off now.
+    """
+    pid = listener_pid(store)
+    if not pid:
+        return False
+    _touch(_marker(store, WAKE_STOP), iso_ms())
+    if os.name != "nt":
+        with contextlib.suppress(OSError):
+            os.kill(pid, 15)
+    return True
 
 
 def ensure_tailer(store: Store, sid: str, transcript_path: Path | str | None = None,
@@ -1832,6 +2083,7 @@ class _Daemon:
         stamp = parse_iso(self.offsets.retry_after)
         if stamp:
             self.poster.retry_after = stamp.timestamp()
+        self.poster.auth_failures = self.offsets.auth_failures
         self.tailers: dict[str, _Tailer] = {}
         self.clean: dict[str, dict[str, Any]] = {}
         self.lanes: dict[str, list[dict[str, Any]]] = {}
@@ -1940,10 +2192,13 @@ class _Daemon:
             return True
         return self.clock() - self.last_records >= RECORDS_EVERY
 
-    def make_snapshot(self, *, alive: str = "daemon", daemon: dict[str, Any] | None = None
-                      ) -> dict[str, Any] | None:
+    def make_snapshot(self, *, alive: str = "daemon", daemon: dict[str, Any] | None = None,
+                      cheap: bool = False) -> dict[str, Any] | None:
+        """`cheap` skips `heartbeat_payload` -- five git subprocesses whose
+        timeouts alone sum to over a minute -- and reuses the heartbeat this
+        machine last published. The hook path has a budget of seconds."""
         now = self.clock()
-        if self.heartbeat is None or now - self.heartbeat_at >= SURFACE_EVERY:
+        if not cheap and (self.heartbeat is None or now - self.heartbeat_at >= SURFACE_EVERY):
             with contextlib.suppress(Exception):
                 records._existing_refs.cache_clear()
                 from . import session as _session
@@ -2032,7 +2287,11 @@ class _Daemon:
             self.poster.policy_hits = 0
             self.level = lower_level(self.level)
             records.eprint(f"canvas: relay rejected an event by policy; streaming at {self.level} now")
-            self.clean = {}
+            # Re-sanitise what is still unacked at the new level, but keep what
+            # the old level already kept home: a lower level keeps it home too,
+            # and forgetting that left those events unacked, so the offset did
+            # not commit and the next poll re-served them instead of reading on.
+            self.clean = {ident: clean for ident, clean in self.clean.items() if clean.get("skip")}
         # An event the level kept home is as done as an acknowledged one: the
         # offset must move past it or the tailer waits forever.
         kept_home = {ident for ident, clean in self.clean.items() if clean.get("skip")}
@@ -2055,6 +2314,7 @@ class _Daemon:
             _touch(_marker(self.store, "room-gone"), iso_ms())
         self.offsets.retry_after = (iso_ms(datetime.fromtimestamp(self.poster.retry_after, timezone.utc))
                                     if self.poster.retry_after > self.clock() else None)
+        self.offsets.auth_failures = self.poster.auth_failures
         self.offsets.save()
         self.acked_total += len(acked)
         return len(acked)
@@ -2135,62 +2395,134 @@ def tail_loop(store: Store, sid: str, transcript_path: Path | str | None = None,
     return 1 if failed else 0
 
 
+# How much transcript one hook flush reads. Small on purpose: everything read
+# has to be acked in the same hook for the offset to move, and a hook has a
+# second or two. A slice this size is one or two wire batches, so each prompt
+# makes progress; the 1 MiB backlog rule bounds how many slices there can be.
+HOOK_READ_BUDGET = 48 * 1024
+
+
 def flush_if_orphaned(store: Store, sid: str, transcript_path: Path | str | None = None, *,
                       budget: float = 1.5, harness: str | None = None) -> int:
     """The bounded fallback when the daemon could not start (design §3.3).
 
-    Does nothing unless `daemon-failed-<sid>` exists and no live pid holds the
-    pidfile. Then one read, one POST with the whole budget as its timeout, one
-    snapshot that says `via hooks`. Never sleeps; never raises.
+    Does nothing unless `daemon-failed-<sid>` exists, no live pid holds the
+    pidfile and the room is not marked gone. Then, inside `budget` -- a deadline
+    across everything here, not a per-request timeout -- one bounded read, the
+    POSTs that fit, and a snapshot that says `via hooks` built without running
+    git. Offsets are persisted whatever happens, so a `429` or a third `401` is
+    remembered by the next hook. Never sleeps; never raises.
     """
+    deadline = time.monotonic() + max(0.3, float(budget))
+    daemon: _Daemon | None = None
+    acked: set[str] = set()
     try:
         marker = _marker(store, f"daemon-failed-{sid}")
-        if not marker.exists() or tailer_alive(store, sid) or not is_on(store):
+        if (not marker.exists() or tailer_alive(store, sid) or not is_on(store)
+                or _marker(store, "room-gone").exists()):
             return 0
         reason = marker.read_text(encoding="utf-8").strip()[:200] or "spawn failed"
-        daemon = _Daemon(store, sid, transcript_path, harness=harness, timeout=max(0.5, budget - 0.2))
+        daemon = _Daemon(store, sid, transcript_path, harness=harness, timeout=max(0.3, budget - 0.2))
         if not daemon.poster.ready():
             return 0
-        events = []
+        events: list[dict[str, Any]] = []
+        kept_home: set[str] = set()
         if daemon.transcript is not None:
             tailer = daemon._tailer_for(daemon.transcript, "main")
-            for event in tailer.poll(budget=256 * 1024):
+            for event in tailer.poll(budget=HOOK_READ_BUDGET):
                 daemon._remember(event)
                 clean = sanitise(event, daemon.level, store.repo_root)
-                if clean is not None:
+                if clean is None:
+                    kept_home.add(event["id"])
+                else:
                     events.append(clean)
-        snap = daemon.make_snapshot(alive="hook", daemon={"state": "failed", "reason": reason})
+        snap = daemon.make_snapshot(alive="hook", daemon={"state": "failed", "reason": reason}, cheap=True)
         if snap is not None:
             clean = sanitise(snap, daemon.level, store.repo_root)
             if clean is not None:
                 events.append(clean)
         pending_bytes, pending_events = read_pending(store, sid)
-        events = pending_events + events
-        events = [e for e in events if not validate(e)]
-        if not events:
-            return 0
-        acked = daemon.poster.send(events, daemon.gaps)
-        kept_home = {e["id"] for t in daemon.tailers.values() for e in t.unacked
-                     if sanitise(e, daemon.level, store.repo_root) is None}
+        candidates = pending_events + events
+        # Same rule as the daemon's `flush`: an event the relay would never take
+        # is counted done, or one bad spool line would block every line after it.
+        invalid = {e["id"] for e in candidates if validate(e)}
+        events = [e for e in candidates if e["id"] not in invalid]
+        if events:
+            acked = daemon.poster.send(events, daemon.gaps, deadline=deadline)
+            if not acked:
+                invalid = set()             # nothing left the machine: keep the spool as is
+        done = acked | invalid
         for tailer in daemon.tailers.values():
-            tailer.ack(acked | kept_home)
-        if pending_events and all(e["id"] in acked for e in pending_events):
+            tailer.ack(done | kept_home)
+        if pending_events and all(e["id"] in done for e in pending_events):
             consume_pending(store, sid, pending_bytes)
         for extra in daemon.gaps:
             spool(store, sid, extra)
-        daemon.offsets.retry_after = (iso_ms(datetime.fromtimestamp(daemon.poster.retry_after, timezone.utc))
-                                      if daemon.poster.retry_after > time.time() else None)
-        daemon.offsets.save()
         return len(acked)
     except Exception:
+        return len(acked)
+    finally:
+        if daemon is not None:
+            with contextlib.suppress(Exception):
+                if daemon.poster.gone:
+                    _touch(_marker(store, "room-gone"), iso_ms())
+                daemon.offsets.retry_after = (
+                    iso_ms(datetime.fromtimestamp(daemon.poster.retry_after, timezone.utc))
+                    if daemon.poster.retry_after > time.time() else None)
+                daemon.offsets.auth_failures = daemon.poster.auth_failures
+                daemon.offsets.save()
+
+
+def flush_spools(store: Store, *, timeout: float = 3.0) -> int:
+    """Post every `pending-*.ndjson` that no live daemon will drain.
+
+    `colab answer` with no session running spools its event under the newest
+    offsets file's session, or `cli`; a daemon reads only its own spool and
+    the hook fallback only the current session's, so those files were written
+    and never read while the CLI reported the answer as queued. `colab sync`
+    and `colab status` call this. A spool whose daemon is alive is left to it.
+    """
+    if not is_on(store):
         return 0
+    cfg = canvas_config(store)
+    poster = Poster(str(cfg.get("relay") or ""), str(cfg.get("room") or ""),
+                    str(cfg.get("token") or ""), timeout=timeout)
+    sent = 0
+    for path in sorted(markers_dir(store).glob("pending-*.ndjson")):
+        sid = path.name[len("pending-"):-len(".ndjson")]
+        if tailer_alive(store, sid):
+            continue
+        data, events = read_pending(store, sid)
+        invalid = {e["id"] for e in events if validate(e)}
+        good = [e for e in events if e["id"] not in invalid]
+        acked = poster.send(good, []) if good else set()
+        if good and not acked:
+            if not poster.ready():
+                break
+            continue
+        if all(e["id"] in acked or e["id"] in invalid for e in events):
+            consume_pending(store, sid, data)
+        sent += len(acked)
+    return sent
 
 
 def answer(store: Store, target: dict[str, Any], text: str, *, timeout: float = 3) -> bool:
-    """The agent's reply to a canvas ask: one POST now, spooled if that fails."""
+    """The agent's reply to a canvas message: one POST now, spooled if that fails.
+
+    An `ask` is resolved with an `answer` event. A `ping` or a `say` cannot be
+    (the relay resolves only asks, §10.1), so the reply to one is a `say` to the
+    room, which is where the person who typed it is looking.
+    """
     cfg = canvas_config(store)
     ask = str(target.get("id") or target.get("ask") or "")
     config = store.config()
+    if str(target.get("kind") or "") in ("ping", "say"):
+        with contextlib.suppress(Exception):
+            post_message(str(cfg.get("relay") or ""), str(cfg.get("room") or ""),
+                         str(cfg.get("token") or ""), to="*", kind="say",
+                         text=f"re {ask}: {records.scrub(text)}"[:2000], timeout=timeout)
+            return True
+        return False
     body = {"ask": ask, "text": records.scrub(text)[:3000]}
     event = build("answer", body, session=str(target.get("session") or ""), lane="main",
                   harness=str(config.get("harness") or ""), model=str(config.get("model") or "") or None,

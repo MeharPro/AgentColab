@@ -288,5 +288,75 @@ has "doctor runs end to end" "$out" "transport"
 has "and reports chat is absent" "$out" "no platform set up"
 
 echo
+echo "15. the canvas: a room, a stream, an export, a ping that reaches the inbox"
+# A real relay (the stdlib one) on a free port, in the background; killed in
+# cleanup. Everything below is what the docs' quickstart promises.
+PORT_FILE="$WORK/canvas.port"
+colab canvas serve --port 0 --port-file "$PORT_FILE" >"$WORK/relay.log" 2>&1 &
+RELAY_PID=$!
+trap 'kill "$RELAY_PID" 2>/dev/null; cleanup' EXIT
+for _ in $(seq 50); do [ -s "$PORT_FILE" ] && break; sleep 0.1; done
+if [ -s "$PORT_FILE" ]; then ok "the relay starts and writes its port"
+else bad "the relay starts and writes its port" "$(tail -3 "$WORK/relay.log" 2>/dev/null)"; fi
+RELAY="http://127.0.0.1:$(cat "$PORT_FILE" 2>/dev/null || echo 0)"
+cd "$WORK/alice"
+out=$(colab canvas new --relay "$RELAY" --name e2e 2>&1)
+has "a room is minted" "$out" "join code"
+JOIN=$(printf '%s' "$out" | grep -oE '[2-9a-hj-km-np-tv-z]{4}-[2-9a-hj-km-np-tv-z]{4}-[2-9a-hj-km-np-tv-z]{2}\.[2-9a-hj-km-np-tv-z]{24}' | head -1)
+ROOMCODE="${JOIN%%.*}"
+out=$(colab canvas join "$JOIN" --relay "$RELAY" --stream summary 2>&1)
+has "alice joins the room" "$out" "joined the canvas room as alice"
+has "and is told her owner link once" "$out" "/#$ROOMCODE/o=ot-"
+has "streaming what she asked for" "$out" "streams  summary"
+mode=$(python3 -c 'import os,sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$(ls -d "$AGENTCOLAB_HOME"/*/p/*/config.json | head -1)")
+[ "$mode" = "0o600" ] && ok "config.json holding the credentials is mode 600" || bad "config.json is mode 600" "got $mode"
+out=$(colab canvas export 2>&1)
+has "export writes the project file" "$out" "wrote .agentcolab/agentcolab.json"
+has "with the room code" "$(cat .agentcolab/agentcolab.json)" "\"room\": \"$ROOMCODE\""
+hasnt "and never a token" "$(cat .agentcolab/agentcolab.json)" "at-"
+FIX="$WORK/fixture.jsonl"
+python3 - "$FIX" "$WORK/alice" <<'PY'
+import json, sys
+path, repo = sys.argv[1], sys.argv[2]
+sid = "e2e00000-0000-4000-8000-000000000001"
+rows = [
+  {"parentUuid": None, "isSidechain": False, "type": "user", "uuid": "u1", "timestamp": "2026-09-05T10:00:00.000Z",
+   "sessionId": sid, "cwd": repo, "origin": {"kind": "human"}, "message": {"role": "user", "content": "port the hooks"}},
+  {"parentUuid": "u1", "isSidechain": False, "type": "assistant", "uuid": "a1", "timestamp": "2026-09-05T10:00:01.000Z",
+   "sessionId": sid, "cwd": repo, "apiBlockIndex": 0,
+   "message": {"model": "claude-fable-5-1", "role": "assistant", "stop_reason": "end_turn",
+               "content": [{"type": "text", "text": "Ported."}]}},
+]
+with open(path, "w", encoding="utf-8") as h:
+    for row in rows:
+        h.write(json.dumps(row) + "\n")
+PY
+out=$(colab canvas tail --session e2e00000-0000-4000-8000-000000000001 --transcript "$FIX" --once 2>&1); rc=$?
+[ "$rc" -eq 0 ] && ok "a one-shot tail over a fixture exits 0" || bad "a one-shot tail exits 0" "$out"
+events=$(curl -s -H "Authorization: Bearer $ROOMCODE" "$RELAY/r/$ROOMCODE/events?after=0" 2>/dev/null \
+  || python3 -c 'import sys,urllib.request; r=urllib.request.Request(sys.argv[1], headers={"Authorization": "Bearer "+sys.argv[2]}); print(urllib.request.urlopen(r, timeout=5).read().decode())' "$RELAY/r/$ROOMCODE/events?after=0" "$ROOMCODE")
+has "the relay holds the fixture's prompt" "$events" "port the hooks"
+hasnt "at summary the assistant text stays home" "$events" "Ported."
+cd "$WORK/bob"
+# Section 12 replaced the machine; bob has not rejoined since.
+colab join --as bob --yes --no-install >/dev/null 2>&1
+out=$(colab canvas join "$JOIN" --relay "$RELAY" 2>&1)
+has "bob joins the same room" "$out" "joined the canvas room as bob"
+cd "$WORK/alice"
+out=$(colab ping bob "look at src/pay.py when you are up" 2>&1)
+has "alice pings bob on the canvas" "$out" "pinged bob on the canvas"
+cd "$WORK/bob"
+colab sync --quiet >/dev/null 2>&1
+out=$(colab inbox --chat 2>&1)
+has "the ping is in bob's inbox after his next sync" "$out" "look at src/pay.py when you are up"
+has "attributed to alice, the token's name" "$out" "alice"
+out=$(colab wake status 2>&1)
+has "wake is off until bob turns it on" "$out" "wake      off"
+out=$(colab doctor 2>&1)
+has "doctor has a wake line" "$out" "wake"
+kill "$RELAY_PID" 2>/dev/null; wait "$RELAY_PID" 2>/dev/null
+ok "the relay is stopped"
+
+echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

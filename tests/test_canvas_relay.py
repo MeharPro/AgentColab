@@ -38,6 +38,10 @@ from agentcolab import canvas_relay          # noqa: E402
 REMOTE = os.environ.get("CANVAS_RELAY")
 UA = "AgentColab/1 (+https://github.com/AgentColab/AgentColab)"
 ALPHABET = "23456789abcdefghjkmnpqrstvwxyz"
+ISO_MS = r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$"
+NO_WAKE = {"requested": False, "state": "none", "reason": None, "ts": None}
+DEFAULT_WAKE = {"enabled": False, "from": "agents", "max_per_hour": 4, "used_this_hour": 0,
+                "listener": "absent", "set_by": None, "ts": None}
 _counter = itertools.count(1)
 
 
@@ -168,11 +172,14 @@ class RelayContract(unittest.TestCase):
         room["room4"] = room["room"][:4]
         return room
 
-    def _register(self, room, name, **body):
+    def _register_out(self, room, name, **body):
         status, _, out = self.call("POST", f"/r/{room['room']}/agents/{name}",
                                    auth=room["join_code"], body=body)
         self.assertEqual(status, 200, out)
-        return out["token"]
+        return out
+
+    def _register(self, room, name, **body):
+        return self._register_out(room, name, **body)["token"]
 
     def _post(self, room, token, events=None, raw=None):
         raw = raw if raw is not None else _batch(events)
@@ -188,13 +195,35 @@ class RelayContract(unittest.TestCase):
         self.assertEqual(status, 202, out)
         return out
 
-    def _open(self, room, *, auth=None, ticket=None, after=None, headers=None, timeout=5):
+    def _message(self, room, auth, **body):
+        """POST /messages, asserting 201; returns the {id, seq} answer."""
+        status, _, out = self.call("POST", f"/r/{room['room']}/messages", auth=auth, body=body)
+        self.assertEqual(status, 201, out)
+        return out
+
+    def _messages(self, room):
+        """Every message object the room holds, ascending by seq."""
+        out, after = [], 0
+        while True:
+            status, _, page = self.call("GET", f"/r/{room['room']}/messages?after={after}&limit=200",
+                                        auth=room["room"])
+            self.assertEqual(status, 200, page)
+            out.extend(page["messages"])
+            if not page["more"]:
+                return out
+            after = out[-1]["seq"]
+
+    def _find(self, room, message_id):
+        return next(m for m in self._messages(room) if m["id"] == message_id)
+
+    def _open(self, room, *, auth=None, ticket=None, after=None, headers=None, timeout=5,
+              path="stream"):
         query = []
         if ticket is not None:
             query.append("ticket=" + ticket)
         if after is not None:
             query.append("after=" + str(after))
-        path = f"/r/{room['room']}/stream" + ("?" + "&".join(query) if query else "")
+        path = f"/r/{room['room']}/{path}" + ("?" + "&".join(query) if query else "")
         hdrs = {"User-Agent": UA, "Accept": "text/event-stream"}
         if auth:
             hdrs["Authorization"] = "Bearer " + auth
@@ -216,6 +245,9 @@ class RelayContract(unittest.TestCase):
                 return err.code, self._parse(err.read())
         resp.close()
         self.fail("the stream opened when it should have been refused")
+
+    def _agent_stream(self, room, token):
+        return self._stream(room, auth=token, path="agent-stream")
 
     @staticmethod
     def _frames(resp, until, cap: int = 100_000):
@@ -248,6 +280,9 @@ class RelayContract(unittest.TestCase):
     def _until_live(self, resp):
         return self._frames(resp, lambda f: f.get("t") == "live")
 
+    def _until(self, resp, t):
+        return [f for _, f in self._frames(resp, lambda f: f.get("t") == t)]
+
     @staticmethod
     def _at_eof(resp) -> bool:
         return resp.readline() == b""
@@ -265,7 +300,8 @@ class RelayContract(unittest.TestCase):
                                       "version": "1"})
         for method, path in (("GET", "/rooms"), ("PATCH", "/r/x"), ("GET", "/r/"),
                              ("GET", "/healthz/x"), ("POST", "/roomsx"),
-                             ("GET", f"/r/{_fake_room()}/agents/x")):
+                             ("GET", f"/r/{_fake_room()}/agents/x"),
+                             ("POST", f"/r/{_fake_room()}/asks")):          # removed in v1.3
             status, _, body = self.call(method, path)
             self.assertEqual((status, body["error"], body["hint"]),
                              (404, "room", "no such route"), (method, path))
@@ -305,32 +341,40 @@ class RelayContract(unittest.TestCase):
         _, _, snap = self.call("GET", "/r/" + absent["room"], auth=absent["room"])
         self.assertEqual(snap["name"], "room")
 
+        # Only an absent `policy` means the defaults; a falsy wrong type is a wrong type.
         for bad in ({"name": "a" * 61}, {"name": 7}, {"policy": {"retention_min": 4}},
                     {"policy": {"retention_min": 721}}, {"policy": {"max_stream": "off"}},
                     {"policy": {"ticket_ttl_s": "600"}}, {"policy": {"ask_ttl_s": True}},
-                    {"policy": {"ticket_ttl_s": 3601}}, {"policy": [1]}, [1]):
+                    {"policy": {"ticket_ttl_s": 3601}}, {"policy": [1]}, [1],
+                    {"policy": 0}, {"policy": ""}, {"policy": False}, {"policy": None}):
             status, _, body = self.call("POST", "/rooms", body=bad)
             self.assertEqual((status, body["error"]), (400, "schema"), bad)
         status, _, body = self.call("POST", "/rooms", raw=b"{not json")
         self.assertEqual((status, body["error"]), (400, "schema"))
 
-    # -- §0 check order, §1 classes -------------------------------------------
+    # -- §0 check order, §1 classes, §10.2 the owner class ----------------------
 
     def test_auth_matrix(self):
         room = self._room()
-        token = self._register(room, "agent-a")
+        reg = self._register_out(room, "agent-a")
+        token = reg["token"]
         _, _, minted = self.call("POST", f"/r/{room['room']}/ticket", auth=room["room"], body={})
         valid = {"room": room["room"], "join": room["join_code"], "token": token,
-                 "ticket": minted["ticket"]}
+                 "owner": reg["owner_token"], "ticket": minted["ticket"]}
         unknown = {"room": _fake_room(), "join": room["room"] + "." + _sym(24),
-                   "token": "at-" + _sym(32), "ticket": "vt-" + _sym(32)}
+                   "token": "at-" + _sym(32), "owner": "ot-" + _sym(32), "ticket": "vt-" + _sym(32)}
         routes = [
             ("GET", "/r/{room}", {"room"}), ("POST", "/r/{room}/ticket", {"room"}),
             ("GET", "/r/{room}/events?after=0", {"room"}), ("GET", "/r/{room}/records", {"room"}),
-            ("POST", "/r/{room}/asks", {"room"}), ("PUT", "/r/{room}/roles/agent-a", {"room", "token"}),
+            ("POST", "/r/{room}/messages", {"room", "token"}),
+            ("GET", "/r/{room}/messages?after=0", {"room"}),
+            ("PUT", "/r/{room}/roles/agent-a", {"room", "token", "owner"}),
             ("GET", "/r/{room}/stream", {"room"}), ("POST", "/r/{room}/agents/newbie", {"join"}),
-            ("DELETE", "/r/{room}/agents/agent-a", {"join", "token"}),
+            ("DELETE", "/r/{room}/agents/agent-a", {"join", "token", "owner"}),
             ("POST", "/r/{room}/events", {"token"}), ("GET", "/r/{room}/inbox?after=0", {"token"}),
+            ("GET", "/r/{room}/agent-stream", {"token"}),
+            ("PUT", "/r/{room}/agents/agent-a/wake", {"token", "owner"}),
+            ("POST", "/r/{room}/wake-ack", {"token"}),
             ("PUT", "/r/{room}/policy", {"join"}), ("POST", "/r/{room}/prune", {"join"}),
             ("DELETE", "/r/{room}", {"join"}),
         ]
@@ -341,7 +385,7 @@ class RelayContract(unittest.TestCase):
                          {"Authorization": "Token " + room["room"]}):
                 status, _, out = self.call(method, path, body=body, headers=hdrs)
                 self.assertEqual((status, out["error"]), (401, "auth"), (method, path, hdrs))
-            for cls in ("room", "join", "token"):
+            for cls in ("room", "join", "token", "owner"):
                 if cls in allowed:
                     status, _, out = self.call(method, path, auth=unknown[cls], body=body)
                     self.assertEqual((status, out["error"]), (401, "auth"), (method, path, cls))
@@ -365,7 +409,7 @@ class RelayContract(unittest.TestCase):
         _, _, snap = self.call("GET", f"/r/{room['room']}", auth=room["room"])
         self.assertEqual(snap["rseq"], 0, "a refused request must have no side effect")
 
-    # -- §3.2 ---------------------------------------------------------------
+    # -- §3.2, §10.3 ---------------------------------------------------------
 
     def test_snapshot_shape(self):
         room = self._room()
@@ -373,20 +417,22 @@ class RelayContract(unittest.TestCase):
         self._register(room, "alpha")
         status, _, snap = self.call("GET", f"/r/{room['room']}", auth=room["room"])
         self.assertEqual(status, 200)
-        self.assertEqual(set(snap), {"room", "name", "rseq", "policy", "agents", "asks"})
-        self.assertEqual((snap["room"], snap["name"], snap["rseq"], snap["asks"]),
+        self.assertEqual(set(snap), {"room", "name", "rseq", "policy", "agents", "messages"})
+        self.assertEqual((snap["room"], snap["name"], snap["rseq"], snap["messages"]),
                          (room["room"], "conformance", 0, []))
         self.assertEqual([a["name"] for a in snap["agents"]], ["alpha", "beta"])
         beta = snap["agents"][1]
         self.assertEqual(set(beta), {"name", "harness", "human", "model", "stream",
-                                     "registered_at", "last_seen", "kicked", "role", "snapshot"})
+                                     "registered_at", "last_seen", "kicked", "role", "snapshot",
+                                     "wake"})
         self.assertEqual((beta["harness"], beta["human"], beta["model"], beta["stream"],
                           beta["kicked"], beta["role"], beta["snapshot"]),
                          ("codex", "bob", "gpt-5.6", "full", False, None, None))
+        self.assertEqual(beta["wake"], DEFAULT_WAKE, "wake never set: the §10.3 default")
         alpha = snap["agents"][0]
         self.assertEqual((alpha["harness"], alpha["human"], alpha["model"], alpha["stream"]),
                          (None, None, None, "tools"))
-        self.assertRegex(alpha["registered_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
+        self.assertRegex(alpha["registered_at"], ISO_MS)
 
     # -- §3.3, §3.4 gate, §6.13 ------------------------------------------------
 
@@ -428,7 +474,7 @@ class RelayContract(unittest.TestCase):
         status, body = self._stream_error(room, ticket=minted["ticket"])
         self.assertEqual((status, body["error"]), (401, "auth"), "a ticket expires after its ttl")
 
-    # -- §3.6, §3.7 ---------------------------------------------------------
+    # -- §3.6, §3.7, §10.2 ----------------------------------------------------
 
     def test_register_and_kick(self):
         room = self._room(max_stream="tools")
@@ -437,17 +483,26 @@ class RelayContract(unittest.TestCase):
                                    body={"harness": "claude-code", "human": "me\x01", "stream": "full"})
         self.assertEqual(status, 200)
         self.assertRegex(out["token"], canvas_relay.TOKEN_RE)
+        self.assertRegex(out["owner_token"], canvas_relay.OWNER_RE)
         self.assertEqual((out["rseq"], out["policy"], out["effective_stream"]),
                          (0, room["policy"], "tools"))
-        first = out["token"]
+        first, first_owner = out["token"], out["owner_token"]
         _, _, snap = self.call("GET", f"/r/{code}", auth=code)
         registered_at = snap["agents"][0]["registered_at"]
         self.assertEqual((snap["agents"][0]["human"], snap["agents"][0]["stream"]), ("me", "full"))
 
-        second = self._register(room, "agent-a", harness="codex", model="gpt-5.6", stream="summary")
+        again = self._register_out(room, "agent-a", harness="codex", model="gpt-5.6", stream="summary")
+        second, owner = again["token"], again["owner_token"]
         self.assertNotEqual(first, second)
+        self.assertNotEqual(first_owner, owner)
         status, _, out = self._post(room, first, [_ev()])
         self.assertEqual((status, out["error"]), (401, "auth"), "a rotated token answers 401")
+        wake_path = f"/r/{code}/agents/agent-a/wake"
+        status, _, out = self.call("PUT", wake_path, auth=first_owner, body={"enabled": True})
+        self.assertEqual((status, out["error"]), (401, "auth"),
+                         "the owner token rotates with the agent token")
+        status, _, out = self.call("PUT", wake_path, auth=owner, body={"enabled": True})
+        self.assertEqual((status, out["wake"]["set_by"]), (200, "owner"))
         _, _, snap = self.call("GET", f"/r/{code}", auth=code)
         agent = snap["agents"][0]
         self.assertEqual((agent["harness"], agent["human"], agent["model"], agent["stream"],
@@ -469,8 +524,11 @@ class RelayContract(unittest.TestCase):
                                    body={})
         self.assertEqual((status, out["error"]), (503, "full"))
 
-        # kick: the join code, then the agent's own token; a different agent's token is refused
+        # kick: the join code, then the agent's own token; a different agent's
+        # token or owner token is refused
         status, _, out = self.call("DELETE", f"/r/{code}/agents/agent-02", auth=second)
+        self.assertEqual((status, out["error"]), (403, "forbidden"))
+        status, _, out = self.call("DELETE", f"/r/{code}/agents/agent-02", auth=owner)
         self.assertEqual((status, out["error"]), (403, "forbidden"))
         status, _, out = self.call("DELETE", f"/r/{code}/agents/agent-02", auth=room["join_code"])
         self.assertEqual((status, out), (204, b""))
@@ -480,6 +538,8 @@ class RelayContract(unittest.TestCase):
         self.assertEqual(status, 204)
         status, _, out = self._post(room, second, [_ev()])
         self.assertEqual((status, out["error"]), (401, "auth"), "a kicked token answers 401")
+        status, _, out = self.call("PUT", wake_path, auth=owner, body={"enabled": True})
+        self.assertEqual((status, out["error"]), (401, "auth"), "a kicked owner token answers 401")
         _, _, snap = self.call("GET", f"/r/{code}", auth=code)
         kicked = {a["name"]: a["kicked"] for a in snap["agents"]}
         self.assertTrue(kicked["agent-a"] and kicked["agent-02"] and not kicked["agent-03"])
@@ -494,9 +554,12 @@ class RelayContract(unittest.TestCase):
         agent = next(a for a in snap["agents"] if a["name"] == "agent-a")
         self.assertEqual((agent["kicked"], agent["registered_at"]), (False, registered_at))
         self.assertEqual(self._post(room, third, [_ev()])[0], 202)
+        # the owner token leaves the room for its own name
+        twelve = self._register_out(room, "agent-12")
+        status, _, out = self.call("DELETE", f"/r/{code}/agents/agent-12", auth=twelve["owner_token"])
+        self.assertEqual((status, out), (204, b""), "an owner token kicks its own name")
 
         self._need_sse()
-        self.call("DELETE", f"/r/{code}/agents/agent-12", auth=room["join_code"])  # free a seat
         resp = self._stream(room, auth=code)
         self._until_live(resp)
         self._register(room, "agent-new", human="h")
@@ -505,7 +568,8 @@ class RelayContract(unittest.TestCase):
         self.assertIsNone(sse_id)
         self.assertNotIn("rseq", frame)
         self.assertEqual((frame["agent"]["name"], frame["agent"]["human"], frame["agent"]["kicked"],
-                          frame["agent"]["snapshot"]), ("agent-new", "h", False, None))
+                          frame["agent"]["snapshot"], frame["agent"]["wake"]),
+                         ("agent-new", "h", False, None, DEFAULT_WAKE))
         self.call("DELETE", f"/r/{code}/agents/agent-new", auth=room["join_code"])
         _, frame = self._frames(resp, lambda f: f.get("t") == "agent")[-1]
         self.assertEqual((frame["agent"]["name"], frame["agent"]["kicked"]), ("agent-new", True))
@@ -553,6 +617,26 @@ class RelayContract(unittest.TestCase):
         fresh = self._stream(room, auth=code)
         frames = self._until_live(fresh)
         self.assertEqual([f for _, f in frames][1], expected)
+
+    def test_integral_floats_count_as_integers(self):
+        # JSON has one number type: `1.0` is what some serialisers write for 1,
+        # and the Worker's Number.isInteger accepts it, so both backends must.
+        room = self._room(max_stream="full")
+        token = self._register(room, "agent-a")
+        code = room["room"]
+        ev = _ev("text", v=1.0, epoch=0.0, seq=256.0)
+        raw = json.dumps(ev).encode() + b"\n"
+        self.assertIn(b'"v": 1.0', raw)
+        out = self._post_ok(room, token, raw=raw)
+        self.assertEqual((out["accepted"], out["rejected"]), (1, []))
+        _, _, page = self.call("GET", f"/r/{code}/events?after=0", auth=code)
+        self.assertEqual(page["frames"][0]["events"], [_expected(ev, "agent-a")])
+        fraction, boolean = _ev("text", seq=1.5), _ev("text", v=True)
+        out = self._post_ok(room, token, [fraction, boolean])
+        self.assertEqual(out["rejected"], [{"id": fraction["id"], "why": "schema"},
+                                           {"id": boolean["id"], "why": "schema"}])
+        status, _, made = self.call("POST", "/rooms", body={"policy": {"retention_min": 60.0}})
+        self.assertEqual((status, made["policy"]["retention_min"]), (201, 60))
 
     def test_batch_dedup_blank_lines_and_rseq_from_one(self):
         room = self._room()
@@ -773,14 +857,22 @@ class RelayContract(unittest.TestCase):
             self.assertIsNone(sse_id)
             self.assertNotIn("rseq", frame)
             self.assertEqual(frame["agent"]["snapshot"], snapshot)
-        newer = dict(snapshot, state="working")
-        out = self._post_ok(room, token, [_ev("agent", body=newer), _ev("text")])
-        self.assertEqual((out["rseq"], out["accepted"]), (1, 2))
+        working = dict(snapshot, state="working")
+        idle = dict(snapshot, state="idle", n=2)
+        out = self._post_ok(room, token, [_ev("agent", body=working), _ev("text"),
+                                          _ev("agent", body=idle)])
+        self.assertEqual((out["rseq"], out["accepted"]), (1, 3))
         _, _, snap = self.call("GET", f"/r/{code}", auth=code)
-        self.assertEqual(snap["agents"][0]["snapshot"], newer)
+        self.assertEqual(snap["agents"][0]["snapshot"], idle, "the newest snapshot wins")
         _, _, page = self.call("GET", f"/r/{code}/events?after=0", auth=code)
         self.assertEqual([e["kind"] for e in page["frames"][0]["events"]], ["text"],
                          "snapshots never enter a batch row")
+        if self.sse:
+            frames = self._until(resp, "batch")
+            self.assertEqual([f["t"] for f in frames], ["agent", "agent", "batch"],
+                             "one frame per snapshot, each as of its event, ahead of the batch row")
+            self.assertEqual([f["agent"]["snapshot"]["state"] for f in frames[:2]],
+                             ["working", "idle"])
         self._advance(2, sleep_ok=True)
         _, _, before = self.call("GET", f"/r/{code}", auth=code)
         self.call("GET", f"/r/{code}/inbox?after=0", auth=token)
@@ -814,11 +906,15 @@ class RelayContract(unittest.TestCase):
             frames = [f for _, f in self._until_live(resp)]
             self.assertEqual([f["t"] for f in frames], ["hello", "records", "batch", "batch", "live"])
             self.assertEqual(frames[1]["events"], expected)
-        # A newer version of a held rid replaces it; an older one does not.
+        # A newer version of a held rid replaces it; an older one is a dup and
+        # rides in no batch row (§6.4).
         newer = _rec("m-1", "2026-09-04T10:05:00Z")
         older = _rec("m-2", "2026-09-04T09:00:00Z")
         out = self._post_ok(room, b, [newer, older])
-        self.assertEqual((out["accepted"], out["dup"]), (2, 0))
+        self.assertEqual((out["accepted"], out["dup"], out["rseq"]), (1, 1, 3))
+        _, _, page = self.call("GET", f"/r/{code}/events?after=2", auth=code)
+        self.assertEqual([e["id"] for e in page["frames"][0]["events"]], [newer["id"]],
+                         "the stale version is not in the batch row")
         _, _, out = self.call("GET", f"/r/{code}/records", auth=code)
         self.assertEqual([e["id"] for e in out["events"]], [r2["id"], r3["id"], newer["id"]])
 
@@ -898,8 +994,7 @@ class RelayContract(unittest.TestCase):
         token = self._register(room, "agent-a")
         code = room["room"]
         self._post_ok(room, token, [_ev()])                                        # 1
-        self.call("POST", f"/r/{code}/asks", auth=code, body={"to": "agent-a", "text": "q",
-                                                              "viewer": "sam"})       # 2
+        self._message(room, code, to="agent-a", text="q", viewer="sam")            # 2
         self.call("PUT", f"/r/{code}/roles/agent-a", auth=code, body={"role": "r", "viewer": "v"})  # 3
         self.call("PUT", f"/r/{code}/policy", auth=room["join_code"], body={"retention_min": 60})   # 4
         self._post_ok(room, token, [_ev()])                                        # 5
@@ -911,6 +1006,9 @@ class RelayContract(unittest.TestCase):
         self.assertEqual((hello["backfill"], hello["gap"], hello["room"]["rseq"]), ("replay", None, 5))
         self.assertEqual(frames[1][1]["role"]["set_seq"], 3)
         self.assertEqual(frames[2][1]["policy"]["retention_min"], 60)
+        resp = self._stream(room, auth=code, after=1)
+        self.assertEqual([f["t"] for _, f in self._until_live(resp)],
+                         ["hello", "message", "role", "policy", "batch", "live"])
         resp = self._stream(room, auth=code, after=5)
         frames = self._until_live(resp)
         self.assertEqual([f["t"] for _, f in frames], ["hello", "live"])
@@ -955,162 +1053,462 @@ class RelayContract(unittest.TestCase):
         rseqs = [f["rseq"] for f in frames if "rseq" in f]
         self.assertEqual(rseqs, sorted(rseqs))
 
-    # -- §3.9, §3.10, §6.12 asks ------------------------------------------------
+    # -- §10.1 messages, §3.9 inbox, §6.12 answers ------------------------------
 
-    def test_asks_inbox_and_answers(self):
+    def test_messages_inbox_and_answers(self):
         room = self._room()
         a = self._register(room, "agent-a")
         b = self._register(room, "agent-b")
         code, join = room["room"], room["join_code"]
         self._post_ok(room, a, [_ev()])                                           # row 1
-        status, _, ask1 = self.call("POST", f"/r/{code}/asks", auth=code,
-                                    body={"to": "agent-a", "text": "why?\x00\n", "viewer": "sam"})
-        self.assertEqual(status, 201, ask1)
-        self.assertEqual(ask1, {"id": f"ca-{room['room4']}-2", "seq": 2})
+        m1 = self._message(room, code, to="agent-a", text="why?\x00\n", viewer="sam")
+        self.assertEqual(m1, {"id": f"cm-{room['room4']}-2", "seq": 2})
         _, _, page = self.call("GET", f"/r/{code}/events?after=1", auth=code)
         frame = page["frames"][0]
-        self.assertEqual(frame["t"], "ask")
-        self.assertEqual(frame["ask"], {"id": ask1["id"], "seq": 2, "to": "agent-a", "viewer": "sam",
-                                        "text": "why?", "ts": frame["ask"]["ts"], "state": "open",
-                                        "answer": None})
-        self.assertEqual(frame["rseq"], frame["ask"]["seq"])
+        self.assertEqual(frame["t"], "message")
+        ask = frame["message"]
+        self.assertRegex(ask["ts"], ISO_MS)
+        self.assertEqual(ask, {"id": m1["id"], "seq": 2, "kind": "ask", "to": "agent-a",
+                               "from": {"kind": "viewer", "name": "sam"}, "text": "why?",
+                               "ts": ask["ts"], "state": "open", "answer": None, "wake": NO_WAKE},
+                         "a viewer's message to a name defaults to kind ask")
+        self.assertEqual(frame["rseq"], ask["seq"])
 
         status, _, inbox = self.call("GET", f"/r/{code}/inbox?after=0", auth=a)
         self.assertEqual(status, 200)
-        self.assertEqual(inbox, {"rseq": 2, "role": None,
-                                 "asks": [{"id": ask1["id"], "seq": 2, "viewer": "sam", "text": "why?",
-                                           "ts": frame["ask"]["ts"]}]})
+        self.assertEqual(inbox, {"rseq": 2, "role": None, "messages": [ask]})
         _, _, other = self.call("GET", f"/r/{code}/inbox?after=0", auth=b)
-        self.assertEqual(other["asks"], [], "an ask reaches only the agent it names")
+        self.assertEqual(other["messages"], [], "a message to a name reaches only that agent")
         status, _, out = self.call("GET", f"/r/{code}/inbox?after=x", auth=a)
         self.assertEqual((status, out["error"]), (400, "schema"))
         status, _, out = self.call("GET", f"/r/{code}/inbox?after=0", auth=code)
         self.assertEqual((status, out["error"]), (403, "forbidden"))
 
-        _, _, ask2 = self.call("POST", f"/r/{code}/asks", auth=code,
-                               body={"to": "agent-a", "text": "and?", "viewer": "pat"})
+        # An agent's line to the room: from is the token's name, kind defaults
+        # to say, viewer is ignored and wake is stored false for "*".
+        m2 = self._message(room, b, to="*", text="hi all", wake=True, viewer="ignored")
+        self.assertEqual(m2["seq"], 3)
+        say = self._find(room, m2["id"])
+        self.assertEqual((say["kind"], say["to"], say["from"], say["state"], say["wake"]),
+                         ("say", "*", {"kind": "agent", "name": "agent-b"}, "sent", NO_WAKE))
+        m3 = self._message(room, b, to="agent-a", kind="ping", text="look at #4")
+        self.assertEqual(m3["seq"], 4)
         _, _, second = self.call("GET", f"/r/{code}/inbox?after={inbox['rseq']}", auth=a)
-        self.assertEqual([x["id"] for x in second["asks"]], [ask2["id"]],
-                         "the cursor is the returned rseq; the first ask is not repeated")
-        self.assertEqual(second["rseq"], 3)
+        self.assertEqual([x["id"] for x in second["messages"]], [m2["id"], m3["id"]],
+                         "the cursor is the returned rseq; * and the name both arrive")
+        self.assertEqual((second["rseq"], second["messages"][1]["state"]), (4, "sent"))
+        _, _, b_inbox = self.call("GET", f"/r/{code}/inbox?after=0", auth=b)
+        self.assertEqual([x["id"] for x in b_inbox["messages"]], [m2["id"]],
+                         "* reaches everyone, a name only its agent")
         _, _, third = self.call("GET", f"/r/{code}/inbox?after={second['rseq']}", auth=a)
-        self.assertEqual(third["asks"], [])
+        self.assertEqual(third["messages"], [])
         _, _, snap = self.call("GET", f"/r/{code}", auth=code)
-        self.assertEqual([x["id"] for x in snap["asks"]], [ask1["id"], ask2["id"]])
+        self.assertEqual([x["id"] for x in snap["messages"]], [m1["id"], m2["id"], m3["id"]])
 
-        # answers: wrong agent, unknown ask, non-string ask -> schema; the right one answers
-        wrong = _ev("answer", ref=ask1["id"], body={"ask": ask1["id"], "text": "not mine"})
-        unknown = _ev("answer", body={"ask": f"ca-{room['room4']}-999", "text": "?"})
+        # answers: wrong agent, unknown id, non-string, absent, not an ask -> schema
+        wrong = _ev("answer", ref=m1["id"], body={"ask": m1["id"], "text": "not mine"})
+        unknown = _ev("answer", body={"ask": f"cm-{room['room4']}-999", "text": "?"})
         untyped = _ev("answer", body={"ask": 2, "text": "?"})
         absent = _ev("answer", body={"text": "?"})
+        not_an_ask = _ev("answer", body={"ask": m3["id"], "text": "a ping takes no answer"})
         out = self._post_ok(room, b, [wrong])
         self.assertEqual(out["rejected"], [{"id": wrong["id"], "why": "schema"}])
-        out = self._post_ok(room, a, [unknown, untyped, absent])
-        self.assertEqual([r["why"] for r in out["rejected"]], ["schema"] * 3)
-        answer = _ev("answer", ref=ask1["id"], ts="2026-09-04T10:01:00.000Z",
-                     body={"ask": ask1["id"], "text": "because"})
+        out = self._post_ok(room, a, [unknown, untyped, absent, not_an_ask])
+        self.assertEqual([r["why"] for r in out["rejected"]], ["schema"] * 4)
+        answer = _ev("answer", ref=m1["id"], ts="2026-09-04T10:01:00.000Z",
+                     body={"ask": m1["id"], "text": "because"})
         out = self._post_ok(room, a, [answer, _ev()])
-        self.assertEqual((out["rseq"], out["accepted"]), (4, 2), "the 202 rseq is the batch row's")
-        _, _, page = self.call("GET", f"/r/{code}/events?after=3", auth=code)
-        self.assertEqual([(f["rseq"], f["t"]) for f in page["frames"]], [(4, "batch"), (5, "ask")])
-        answered = page["frames"][1]["ask"]
-        self.assertEqual(answered, {"id": ask1["id"], "seq": 2, "to": "agent-a", "viewer": "sam",
-                                    "text": "why?", "ts": frame["ask"]["ts"], "state": "answered",
-                                    "answer": {"text": "because", "ts": "2026-09-04T10:01:00.000Z"}})
-        self.assertEqual(page["frames"][0]["events"][0]["body"]["ask"], ask1["id"],
+        self.assertEqual((out["rseq"], out["accepted"]), (5, 2), "the 202 rseq is the batch row's")
+        _, _, page = self.call("GET", f"/r/{code}/events?after=4", auth=code)
+        self.assertEqual([(f["rseq"], f["t"]) for f in page["frames"]], [(5, "batch"), (6, "message")])
+        answered = page["frames"][1]["message"]
+        self.assertEqual(answered, dict(ask, state="answered",
+                                        answer={"text": "because", "ts": "2026-09-04T10:01:00.000Z"}),
+                         "a state change is a new row keeping id and seq")
+        self.assertEqual(page["frames"][0]["events"][0]["body"]["ask"], m1["id"],
                          "the answer event itself is stored in the batch row")
+        _, _, page = self.call("GET", f"/r/{code}/events?after=1&limit=1", auth=code)
+        self.assertEqual(page["frames"][0]["message"]["state"], "open",
+                         "the creation row keeps the state it announced")
         _, _, inbox = self.call("GET", f"/r/{code}/inbox?after=0", auth=a)
-        self.assertEqual([x["id"] for x in inbox["asks"]], [ask2["id"]])
-        again = _ev("answer", body={"ask": ask1["id"], "text": "twice"})
+        self.assertEqual([(x["id"], x["state"]) for x in inbox["messages"]],
+                         [(m1["id"], "answered"), (m2["id"], "sent"), (m3["id"], "sent")],
+                         "the inbox carries every message, in its current state")
+        again = _ev("answer", body={"ask": m1["id"], "text": "twice"})
         out = self._post_ok(room, a, [again])
-        self.assertEqual((out["rseq"], out["accepted"]), (6, 1))
-        _, _, page = self.call("GET", f"/r/{code}/events?after=5", auth=code)
-        self.assertEqual([f["t"] for f in page["frames"]], ["batch"],
-                         "answering an answered ask changes nothing and emits no ask frame")
-        _, _, snap = self.call("GET", f"/r/{code}", auth=code)
-        self.assertEqual([(x["id"], x["state"]) for x in snap["asks"]],
-                         [(ask1["id"], "answered"), (ask2["id"], "open")])
+        self.assertEqual((out["rseq"], out["rejected"]), (6, [{"id": again["id"], "why": "schema"}]),
+                         "only an open ask resolves (§10.1)")
         if self.sse:
-            resp = self._stream(room, auth=code, after=3)
+            resp = self._stream(room, auth=code, after=4)
             frames = [f for _, f in self._until_live(resp)]
             self.assertEqual([(f.get("rseq"), f["t"]) for f in frames],
-                             [(None, "hello"), (4, "batch"), (5, "ask"), (6, "batch"), (None, "live")])
-            self.assertEqual(frames[2]["ask"]["state"], "answered")
-        # 404 agent for a kicked target; the join code cannot ask
+                             [(None, "hello"), (5, "batch"), (6, "message"), (None, "live")])
+            self.assertEqual(frames[2]["message"], answered)
+            self.assertEqual(frames[0]["room"]["messages"], self._messages(room))
+        # 404 agent for a kicked or unknown target; the join code cannot post; * survives a kick
         self.call("DELETE", f"/r/{code}/agents/agent-b", auth=join)
-        status, _, out = self.call("POST", f"/r/{code}/asks", auth=code,
-                                   body={"to": "agent-b", "text": "t", "viewer": "sam2"})
-        self.assertEqual((status, out["error"]), (404, "agent"))
-        status, _, out = self.call("POST", f"/r/{code}/asks", auth=code,
-                                   body={"to": "nobody", "text": "t", "viewer": "sam3"})
-        self.assertEqual((status, out["error"]), (404, "agent"))
+        for to in ("agent-b", "nobody"):
+            status, _, out = self.call("POST", f"/r/{code}/messages", auth=code,
+                                       body={"to": to, "text": "t", "viewer": "sam-" + to})
+            self.assertEqual((status, out["error"]), (404, "agent"), to)
+        status, _, out = self.call("POST", f"/r/{code}/messages", auth=join,
+                                   body={"to": "agent-a", "text": "t", "viewer": "sam4"})
+        self.assertEqual((status, out["error"]), (403, "forbidden"))
+        self._message(room, code, to="*", text="t", viewer="sam5")
 
-    def test_ask_limits(self):
+    def test_message_limits(self):
         room = self._room()
-        self._register(room, "agent-a")
+        a = self._register(room, "agent-a")
         code = room["room"]
         good = {"to": "agent-a", "text": "t", "viewer": "v"}
         for bad in ({"text": "t", "viewer": "v"}, {"to": "agent-a", "viewer": "v"},
                     {"to": "agent-a", "text": "t"}, {"to": "agent-a", "text": "t", "viewer": ""},
                     {"to": "agent-a", "text": "t", "viewer": "\x01\x02"},
                     {"to": "agent-a", "text": "t", "viewer": "v" * 41},
-                    {"to": "agent-a", "text": "x" * 501, "viewer": "v"},
-                    {"to": "agent-a", "text": "🚀" * 501, "viewer": "v"},
-                    {"to": 5, "text": "t", "viewer": "v"}, {"to": "agent-a", "text": 5, "viewer": "v"}):
-            status, _, out = self.call("POST", f"/r/{code}/asks", auth=code, body=bad)
+                    {"to": "agent-a", "text": "x" * 2001, "viewer": "v"},
+                    {"to": "agent-a", "text": "", "viewer": "v"},
+                    {"to": "agent-a", "text": "\x00\t", "viewer": "v"},
+                    {"to": 5, "text": "t", "viewer": "v"}, {"to": "agent-a", "text": 5, "viewer": "v"},
+                    dict(good, kind="shout"), dict(good, kind=3), dict(good, wake="yes"),
+                    dict(good, wake=1)):
+            status, _, out = self.call("POST", f"/r/{code}/messages", auth=code, body=bad)
             self.assertEqual((status, out["error"]), (400, "schema"), bad)
-        status, _, out = self.call("POST", f"/r/{code}/asks", auth=code,
-                                   body=dict(good, text="é" * 500, viewer="🙂" * 40))
-        self.assertEqual(status, 201, out)
-        status, headers, out = self.call("POST", f"/r/{code}/asks", auth=code,
+        status, _, out = self.call("GET", f"/r/{code}", auth=code)
+        self.assertEqual((out["rseq"], out["messages"]), (0, []), "a refused message has no side effect")
+        first = self._message(room, code, to="agent-a", text="é" * 2000, viewer="🙂" * 40)
+        # say to a named agent is legal and is never open
+        fyi = self._message(room, code, to="agent-a", kind="say", text="fyi", viewer="w")
+        self.assertEqual((self._find(room, fyi["id"])["kind"], self._find(room, fyi["id"])["state"]),
+                         ("say", "sent"))
+        status, headers, out = self.call("POST", f"/r/{code}/messages", auth=code,
                                          body=dict(good, viewer="🙂" * 40))
-        self.assertEqual((status, out["error"]), (429, "rate"), "one ask per viewer per 5 s")
+        self.assertEqual((status, out["error"]), (429, "rate"), "one message per viewer name per 5 s")
         self.assertGreaterEqual(int(headers["Retry-After"]), 1)
-        for i in range(39):
-            status, _, out = self.call("POST", f"/r/{code}/asks", auth=code,
-                                       body=dict(good, viewer=f"viewer-{i}"))
-            self.assertEqual(status, 201, out)
-        status, _, out = self.call("POST", f"/r/{code}/asks", auth=code,
+        # an agent posts ten a minute
+        for i in range(10):
+            self._message(room, a, to="*", text=str(i))
+        status, headers, out = self.call("POST", f"/r/{code}/messages", auth=a,
+                                         body={"to": "*", "text": "eleven"})
+        self.assertEqual((status, out["error"]), (429, "rate"), "ten messages a minute per agent")
+        self.assertGreaterEqual(int(headers["Retry-After"]), 1)
+        # 200 open asks fill the room; pings and says are not capped by state
+        for i in range(199):
+            self._message(room, code, to="agent-a", text="t", viewer=f"viewer-{i}")
+        status, _, out = self.call("POST", f"/r/{code}/messages", auth=code,
                                    body=dict(good, viewer="one-too-many"))
         self.assertEqual((status, out["error"]), (503, "full"))
+        last = self._message(room, code, to="agent-a", kind="ping", text="still fits", viewer="pinger")
         _, _, snap = self.call("GET", f"/r/{code}", auth=code)
-        self.assertEqual(len(snap["asks"]), 40)
-        self.assertEqual([x["seq"] for x in snap["asks"]], sorted(x["seq"] for x in snap["asks"]))
+        self.assertEqual(len(snap["messages"]), 100, "the snapshot carries the newest 100")
+        seqs = [x["seq"] for x in snap["messages"]]
+        self.assertEqual((seqs, seqs[-1]), (sorted(seqs), last["seq"]))
+        # GET /messages pages ascending by seq
+        total = 1 + 1 + 10 + 199 + 1
+        _, _, page = self.call("GET", f"/r/{code}/messages?after=0&limit=200", auth=code)
+        self.assertEqual((len(page["messages"]), page["more"], page["rseq"]), (200, True, total))
+        self.assertEqual(page["messages"][0]["id"], first["id"])
+        _, _, rest = self.call("GET", f"/r/{code}/messages?after={page['messages'][-1]['seq']}", auth=code)
+        self.assertEqual(([x["seq"] for x in rest["messages"]], rest["more"]),
+                         (list(range(201, total + 1)), False))
+        _, _, page = self.call("GET", f"/r/{code}/messages", auth=code)
+        self.assertEqual((len(page["messages"]), page["more"]), (50, True), "after defaults to 0, limit to 50")
+        for query in ("after=x", "after=-1", "limit=0", "limit=201", "limit=x"):
+            status, _, out = self.call("GET", f"/r/{code}/messages?{query}", auth=code)
+            self.assertEqual((status, out["error"]), (400, "schema"), query)
+        for auth in (room["join_code"], a):
+            status, _, out = self.call("GET", f"/r/{code}/messages?after=0", auth=auth)
+            self.assertEqual((status, out["error"]), (403, "forbidden"))
 
-    def test_ask_expiry_via_prune(self):
+    def test_message_expiry_and_retention(self):
         room = self._room(ask_ttl_s=1)
         token = self._register(room, "agent-a")
         code, join = room["room"], room["join_code"]
-        _, _, ask = self.call("POST", f"/r/{code}/asks", auth=code,
-                              body={"to": "agent-a", "text": "t", "viewer": "v"})
+        ask = self._message(room, code, to="agent-a", text="t", viewer="v")
+        ping = self._message(room, token, to="*", kind="ping", text="p")
         _, _, inbox = self.call("GET", f"/r/{code}/inbox?after=0", auth=token)
-        self.assertEqual([x["id"] for x in inbox["asks"]], [ask["id"]], "open until a pass runs")
+        self.assertEqual([(x["id"], x["state"]) for x in inbox["messages"]],
+                         [(ask["id"], "open"), (ping["id"], "sent")], "open until a pass runs")
         time.sleep(1.2)
         status, _, out = self.call("POST", f"/r/{code}/prune", auth=join)       # absent body
         self.assertEqual((status, out), (204, b""))
-        _, _, page = self.call("GET", f"/r/{code}/events?after={ask['seq']}", auth=code)
+        _, _, page = self.call("GET", f"/r/{code}/events?after={ping['seq']}", auth=code)
         self.assertEqual(len(page["frames"]), 1)
         expired = page["frames"][0]
-        self.assertEqual((expired["t"], expired["ask"]["state"], expired["ask"]["id"],
-                          expired["ask"]["seq"], expired["ask"]["answer"]),
-                         ("ask", "expired", ask["id"], ask["seq"], None))
+        self.assertEqual((expired["t"], expired["message"]["state"], expired["message"]["id"],
+                          expired["message"]["seq"], expired["message"]["answer"]),
+                         ("message", "expired", ask["id"], ask["seq"], None))
         self.assertGreater(expired["rseq"], ask["seq"])
         _, _, inbox = self.call("GET", f"/r/{code}/inbox?after=0", auth=token)
-        self.assertEqual(inbox["asks"], [])
+        self.assertEqual([(x["id"], x["state"]) for x in inbox["messages"]],
+                         [(ask["id"], "expired"), (ping["id"], "sent")],
+                         "expiry changes the state and deletes nothing")
         late = _ev("answer", body={"ask": ask["id"], "text": "late"})
         out = self._post_ok(room, token, [late])
-        self.assertEqual(out["accepted"], 1)
-        _, _, page = self.call("GET", f"/r/{code}/events?after={expired['rseq']}", auth=code)
-        self.assertEqual([f["t"] for f in page["frames"]], ["batch"],
-                         "an answer to an expired ask is stored and emits no ask frame")
+        self.assertEqual(out["rejected"], [{"id": late["id"], "why": "schema"}],
+                         "an expired ask is not open, so it takes no answer")
         status, _, out = self.call("POST", f"/r/{code}/prune", auth=join, raw=b"")
         self.assertEqual(status, 204)
+        self._local_only("seven days of message retention need the clock moved")
+        self._advance(6 * 86_400)
+        self._post_ok(room, token, [_ev()])                     # keeps the room alive
+        self._advance(2 * 86_400)
+        status, _, _ = self.call("POST", f"/r/{code}/prune", auth=join)
+        self.assertEqual(status, 204)
+        status, _, snap = self.call("GET", f"/r/{code}", auth=code)
+        self.assertEqual((status, snap["messages"]), (200, []),
+                         "seven days from ts, whatever the kind or state")
+
+    # -- §10.2 owner tokens, §10.3 wake settings ------------------------------
+
+    def test_owner_token_and_wake_settings(self):
+        room = self._room()
+        code = room["room"]
+        reg_a, reg_b = self._register_out(room, "agent-a"), self._register_out(room, "agent-b")
+        a, owner_a, b, owner_b = reg_a["token"], reg_a["owner_token"], reg_b["token"], reg_b["owner_token"]
+        self.assertRegex(owner_a, canvas_relay.OWNER_RE)
+        path = f"/r/{code}/agents/agent-a/wake"
+        _, _, snap = self.call("GET", f"/r/{code}", auth=code)
+        self.assertEqual(snap["agents"][0]["wake"], DEFAULT_WAKE)
+        if self.sse:
+            resp = self._stream(room, auth=code)
+            self._until_live(resp)
+        status, _, out = self.call("PUT", path, auth=owner_a, body={"enabled": True, "from": "room"})
+        self.assertEqual(status, 200, out)
+        self.assertRegex(out["wake"]["ts"], ISO_MS)
+        self.assertEqual(out["wake"], dict(DEFAULT_WAKE, enabled=True, **{"from": "room"},
+                                           set_by="owner", ts=out["wake"]["ts"]))
+        if self.sse:
+            _, frame = self._frames(resp, lambda f: f.get("t") == "agent")[-1]
+            self.assertNotIn("rseq", frame)
+            self.assertEqual((frame["agent"]["name"], frame["agent"]["wake"]), ("agent-a", out["wake"]),
+                             "a settings change emits the agent object")
+        status, _, out = self.call("PUT", path, auth=a, body={"max_per_hour": 2})
+        self.assertEqual(status, 200, out)
+        self.assertEqual((out["wake"]["enabled"], out["wake"]["from"], out["wake"]["max_per_hour"],
+                          out["wake"]["set_by"]), (True, "room", 2, "agent"))
+        _, _, snap = self.call("GET", f"/r/{code}", auth=code)
+        self.assertEqual(snap["agents"][0]["wake"], out["wake"])
+        for wrong in (code, room["join_code"], b, owner_b):
+            status, _, out = self.call("PUT", path, auth=wrong, body={"enabled": False})
+            self.assertEqual((status, out["error"]), (403, "forbidden"), wrong[:3])
+        for bad in ({}, {"other": 1}, {"enabled": "yes"}, {"enabled": 1}, {"from": "anyone"},
+                    {"max_per_hour": 0}, {"max_per_hour": 61}, {"max_per_hour": "4"}, [1]):
+            status, _, out = self.call("PUT", path, auth=owner_a, body=bad)
+            self.assertEqual((status, out["error"]), (400, "schema"), bad)
+        # exactly three routes: wake, roles and leave, for this name only
+        for method, route, body in (("GET", "/inbox?after=0", None), ("GET", "", None),
+                                    ("GET", "/events?after=0", None), ("GET", "/records", None),
+                                    ("GET", "/messages?after=0", None), ("POST", "/ticket", {}),
+                                    ("POST", "/events", {}), ("POST", "/wake-ack", {}),
+                                    ("POST", "/messages", {"to": "*", "text": "t"}),
+                                    ("POST", "/prune", {}), ("PUT", "/policy", {"max_stream": "full"}),
+                                    ("POST", "/agents/agent-c", {}), ("DELETE", "", None)):
+            status, _, out = self.call(method, f"/r/{code}{route}", auth=owner_a, body=body)
+            self.assertEqual((status, out["error"]), (403, "forbidden"), (method, route))
+        status, _, out = self.call("PUT", f"/r/{code}/roles/agent-a", auth=owner_a, body={"role": "tester"})
+        self.assertEqual((status, out), (200, {"set_seq": 1}))
+        _, _, page = self.call("GET", f"/r/{code}/events?after=0", auth=code)
+        self.assertEqual(page["frames"][0]["role"]["viewer"], "owner",
+                         "the owner token forces viewer to owner")
+        status, _, out = self.call("PUT", f"/r/{code}/roles/agent-b", auth=owner_a, body={"role": "x"})
+        self.assertEqual((status, out["error"]), (403, "forbidden"))
+        # rotated with the agent token; the new one works
+        renewed = self._register_out(room, "agent-a")
+        status, _, out = self.call("PUT", path, auth=owner_a, body={"enabled": False})
+        self.assertEqual((status, out["error"]), (401, "auth"))
+        status, _, out = self.call("PUT", path, auth=renewed["owner_token"], body={"enabled": False})
+        self.assertEqual((status, out["wake"]["enabled"], out["wake"]["set_by"]), (200, False, "owner"))
+        status, _, out = self.call("DELETE", f"/r/{code}/agents/agent-b", auth=renewed["owner_token"])
+        self.assertEqual((status, out["error"]), (403, "forbidden"))
+        status, _, out = self.call("DELETE", f"/r/{code}/agents/agent-a", auth=renewed["owner_token"])
+        self.assertEqual((status, out), (204, b""))
+        status, _, out = self.call("PUT", path, auth=renewed["owner_token"], body={"enabled": True})
+        self.assertEqual((status, out["error"]), (401, "auth"), "leaving invalidates the owner token")
+
+    # -- §10.1 wake states, §10.4 wake-acks -------------------------------------
+
+    def test_wake_states_and_acks(self):
+        room = self._room()
+        code = room["room"]
+        a = self._register(room, "agent-a")
+        b = self._register(room, "agent-b")
+        path = f"/r/{code}/agents/agent-a/wake"
+        viewers = (f"viewer-{i}" for i in itertools.count())
+
+        def ping(auth, **over):
+            body = {"to": "agent-a", "kind": "ping", "text": "look", "wake": True}
+            if auth == code:
+                body["viewer"] = next(viewers)
+            body.update(over)
+            return self._find(room, self._message(room, auth, **body)["id"])
+
+        def wake_of(message):
+            return (message["wake"]["state"], message["wake"]["reason"])
+
+        self.assertEqual(ping(code)["wake"], {"requested": True, "state": "off", "reason": None,
+                                              "ts": None}, "wake never enabled: off")
+        self.call("PUT", path, auth=a, body={"enabled": True})
+        self.assertEqual(wake_of(ping(code)), ("declined", "sender not allowed"),
+                         "from: agents -- a viewer may not wake this agent")
+        nobody = ping(b)
+        self.assertEqual(wake_of(nobody), ("nobody", None), "enabled, but no listener connected")
+        self.call("PUT", path, auth=a, body={"from": "room"})
+        self.assertEqual(wake_of(ping(code)), ("nobody", None))
+        self.assertEqual(wake_of(ping(code, wake=False)), ("none", None))
+        status, _, out = self.call("POST", f"/r/{code}/wake-ack", auth=a,
+                                   body={"message": nobody["id"], "result": "woke"})
+        self.assertEqual((status, out["error"]), (400, "schema"), "only pending or busy takes an ack")
+        self._need_sse()
+        listener = self._agent_stream(room, a)
+        self._frames(listener, lambda f: f["t"] == "agent")      # hello, then the listener flip
+        pending = ping(code)
+        self.assertEqual(wake_of(pending), ("pending", None))
+        frames = self._until(listener, "wake")
+        self.assertEqual([f["t"] for f in frames[-2:]], ["message", "wake"])
+        self.assertEqual((frames[-1]["rseq"], frames[-1]["message"], frames[-1]["settings"]["enabled"]),
+                         (pending["seq"], pending, True))
+        for bad in ({"message": pending["id"], "result": "napped"}, {"message": 5, "result": "woke"},
+                    {"result": "woke"}, {"message": pending["id"], "result": "woke", "reason": "r" * 201},
+                    {"message": pending["id"], "result": "woke", "reason": 5}):
+            status, _, out = self.call("POST", f"/r/{code}/wake-ack", auth=a, body=bad)
+            self.assertEqual((status, out["error"]), (400, "schema"), bad)
+        status, _, out = self.call("POST", f"/r/{code}/wake-ack", auth=b,
+                                   body={"message": pending["id"], "result": "woke"})
+        self.assertEqual((status, out["error"]), (400, "schema"), "not addressed to that token")
+        self.assertEqual(wake_of(self._find(room, pending["id"])), ("pending", None),
+                         "a refused ack changes nothing")
+        # busy, then woke: two rows, id and seq kept, used_this_hour counts the woke
+        status, _, out = self.call("POST", f"/r/{code}/wake-ack", auth=a,
+                                   body={"message": pending["id"], "result": "busy",
+                                         "reason": "a session is running"})
+        self.assertEqual(status, 200, out)
+        busy = self._find(room, pending["id"])
+        self.assertEqual(wake_of(busy), ("busy", "a session is running"))
+        self.assertRegex(busy["wake"]["ts"], ISO_MS)
+        _, _, page = self.call("GET", f"/r/{code}/events?after={pending['seq']}", auth=code)
+        row = page["frames"][-1]
+        self.assertEqual((row["t"], row["message"]), ("message", busy))
+        self.assertGreater(row["rseq"], pending["seq"])
+        _, _, snap = self.call("GET", f"/r/{code}", auth=code)
+        self.assertEqual(snap["agents"][0]["wake"]["used_this_hour"], 0)
+        status, _, out = self.call("POST", f"/r/{code}/wake-ack", auth=a,
+                                   body={"message": pending["id"], "result": "woke", "reason": None})
+        self.assertEqual(status, 200, out)
+        self.assertEqual(wake_of(self._find(room, pending["id"])), ("woke", None))
+        _, _, snap = self.call("GET", f"/r/{code}", auth=code)
+        self.assertEqual(snap["agents"][0]["wake"]["used_this_hour"], 1)
+        status, _, out = self.call("POST", f"/r/{code}/wake-ack", auth=a,
+                                   body={"message": pending["id"], "result": "woke"})
+        self.assertEqual((status, out["error"]), (400, "schema"), "woke is final")
+        # the hourly cap: busy at creation, no wake push
+        self.call("PUT", path, auth=a, body={"max_per_hour": 1})
+        capped = ping(code)
+        self.assertEqual(wake_of(capped), ("busy", "hourly cap"))
+        sentinel = self._message(room, b, to="*", text="sentinel")
+        frames = [f for _, f in self._frames(listener, lambda f: f.get("rseq") == sentinel["seq"])]
+        # Agent frames (used_this_hour, then the settings change) and the settings
+        # wake frame are legitimate here; what must not appear is a wake frame
+        # carrying the capped message.
+        self.assertEqual([f["message"] for f in frames if f["t"] == "wake"], [None],
+                         "the capped ping gets no wake push; only the settings change did")
+        self.assertEqual([f["message"]["id"] for f in frames if f["t"] == "message"][-4:],
+                         [pending["id"], pending["id"], capped["id"], sentinel["id"]],
+                         "both acks and the capped ping reach the listener as message rows")
+        if self.relay is not None:
+            self._advance(3600)
+            _, _, snap = self.call("GET", f"/r/{code}", auth=code)
+            self.assertEqual(snap["agents"][0]["wake"]["used_this_hour"], 0, "the window resets on the hour")
+            self.assertEqual(wake_of(ping(code)), ("pending", None))
+
+    # -- §10.5 the agent stream ---------------------------------------------------
+
+    def test_agent_stream(self):
+        self._need_sse()
+        room = self._room()
+        code, join = room["room"], room["join_code"]
+        reg_a = self._register_out(room, "agent-a")
+        a = reg_a["token"]
+        b = self._register(room, "agent-b")
+        _, _, minted = self.call("POST", f"/r/{code}/ticket", auth=code)
+        for kw, expected in (({}, 401), ({"ticket": minted["ticket"]}, 401), ({"auth": code}, 403),
+                             ({"auth": join}, 403), ({"auth": reg_a["owner_token"]}, 403),
+                             ({"auth": "at-" + _sym(32)}, 401)):
+            status, body = self._stream_error(room, path="agent-stream", **kw)
+            self.assertEqual((status, body["error"]), (expected, "auth" if expected == 401 else "forbidden"),
+                             kw)
+        viewer = self._stream(room, auth=code)
+        self._until_live(viewer)
+        listener = self._agent_stream(room, a)
+        sse_id, hello = self._frames(listener, lambda f: True)[0]
+        self.assertEqual((hello["t"], sse_id), ("hello", None))
+        self.assertNotIn("rseq", hello)
+        self.assertIn(hello["transport"], ("sse", "ws"))
+        self.assertTrue({"agent", "policy"} <= set(hello))
+        self.assertEqual((hello["agent"]["name"], hello["policy"]), ("agent-a", room["policy"]))
+        self.assertEqual(hello["agent"]["wake"]["listener"], "connected")
+        for resp in (viewer, listener):
+            _, frame = self._frames(resp, lambda f: f["t"] == "agent")[-1]
+            self.assertEqual((frame["agent"]["name"], frame["agent"]["wake"]["listener"]),
+                             ("agent-a", "connected"), "the first socket flips listener")
+        self.call("PUT", f"/r/{code}/agents/agent-a/wake", auth=a, body={"enabled": True, "from": "room"})
+        frames = self._until(listener, "wake")
+        self.assertEqual([f["t"] for f in frames], ["agent", "wake"])
+        self.assertEqual((frames[1]["message"], frames[1]["settings"]["enabled"]), (None, True),
+                         "a settings change reaches the listener as a wake frame with no message")
+        ping = self._message(room, code, to="agent-a", kind="ping", text="look", viewer="sam", wake=True)
+        say = self._message(room, b, to="*", text="all")
+        self._message(room, code, to="agent-b", text="not for a", viewer="pat")
+        self.call("PUT", f"/r/{code}/roles/agent-b", auth=code, body={"role": "r", "viewer": "v"})
+        _, _, role = self.call("PUT", f"/r/{code}/roles/agent-a", auth=code, body={"role": "r", "viewer": "v"})
+        self.call("PUT", f"/r/{code}/policy", auth=join, body={"retention_min": 60})
+        frames = [(i, f) for i, f in self._frames(listener, lambda f: f["t"] == "policy")]
+        self.assertEqual([(i, f["t"]) for i, f in frames],
+                         [(ping["seq"], "message"), (ping["seq"], "wake"), (say["seq"], "message"),
+                          (role["set_seq"], "role"), (role["set_seq"] + 1, "policy")],
+                         "only what concerns this agent, plus every policy frame")
+        pair = [f for _, f in frames[:2]]
+        self.assertEqual((pair[0]["message"]["wake"]["state"], pair[1]["message"],
+                          pair[1]["settings"]["listener"]), ("pending", pair[0]["message"], "connected"))
+        self.assertEqual(frames[3][1]["agent"], "agent-a")
+        kinds = [f["t"] for _, f in self._frames(viewer, lambda f: f["t"] == "policy")]
+        self.assertEqual(kinds, ["agent", "message", "message", "message", "role", "role", "policy"],
+                         "viewers see every row and never a wake frame")
+        # a second socket for the same name: both get the pair, no second flip
+        second = self._agent_stream(room, a)
+        self.assertEqual(self._frames(second, lambda f: True)[0][1]["t"], "hello")
+        again = self._message(room, b, to="agent-a", kind="ping", text="again", wake=True)
+        for resp in (listener, second):
+            frames = self._until(resp, "wake")
+            self.assertEqual([(f["t"], f["rseq"]) for f in frames],
+                             [("message", again["seq"]), ("wake", again["seq"])])
+        second.close()
+        time.sleep(0.3)
+        marker = self._message(room, code, to="agent-b", text="marker", viewer="marker")
+        frames = [f for _, f in self._frames(viewer, lambda f: f.get("rseq") == marker["seq"])]
+        self.assertEqual([f["t"] for f in frames], ["message", "message"],
+                         "no flip while one socket stays open")
+        listener.close()
+        _, frame = self._frames(viewer, lambda f: f["t"] == "agent")[-1]
+        self.assertEqual((frame["agent"]["name"], frame["agent"]["wake"]["listener"]),
+                         ("agent-a", "absent"), "the last socket closing flips listener back")
+        self.assertEqual(self._find(room, self._message(room, b, to="agent-a", kind="ping",
+                                                         text="anyone?", wake=True)["id"])["wake"]["state"],
+                         "nobody")
+        # four sockets per name; the fifth is told full and closed
+        held = [self._agent_stream(room, a) for _ in range(4)]
+        for resp in held:
+            self.assertEqual(self._frames(resp, lambda f: True)[0][1]["t"], "hello")
+        extra = self._agent_stream(room, a)
+        _, frame = self._frames(extra, lambda f: True)[0]
+        self.assertEqual(frame, {"t": "full"})
+        self.assertTrue(self._at_eof(extra), "full is followed by close")
 
     # -- §3.11 roles ----------------------------------------------------------
 
     def test_roles(self):
         room = self._room()
-        token = self._register(room, "agent-a")
+        reg = self._register_out(room, "agent-a")
+        token, owner = reg["token"], reg["owner_token"]
         other = self._register(room, "agent-b")
         code = room["room"]
         path = f"/r/{code}/roles/agent-a"
@@ -1140,7 +1538,9 @@ class RelayContract(unittest.TestCase):
         self.assertEqual((status, out["error"]), (429, "rate"), "one change per agent per 30 s")
         self.assertGreaterEqual(int(headers["Retry-After"]), 1)
         status, _, out = self.call("PUT", path, auth=token, body={"role": "other"})
-        self.assertEqual((status, out["error"]), (429, "rate"), "the owner token is capped too")
+        self.assertEqual((status, out["error"]), (429, "rate"), "the agent's own token is capped too")
+        status, _, out = self.call("PUT", path, auth=owner, body={"role": "other"})
+        self.assertEqual((status, out["error"]), (429, "rate"), "and so is the owner token")
         status, _, out = self.call("PUT", path, auth=other, body={"role": "x"})
         self.assertEqual((status, out["error"]), (403, "forbidden"))
         status, _, out = self.call("PUT", path, auth=room["join_code"], body={"role": "x", "viewer": "v"})
@@ -1151,7 +1551,7 @@ class RelayContract(unittest.TestCase):
         _, _, page = self.call("GET", f"/r/{code}/events?after=0", auth=code)
         self.assertEqual(len(page["frames"]), 1, "no-ops and refusals write nothing")
         self._advance(31, sleep_ok=False)
-        status, _, out = self.call("PUT", path, auth=token, body={"role": "tester"})
+        status, _, out = self.call("PUT", path, auth=owner, body={"role": "tester"})
         self.assertEqual((status, out), (200, {"set_seq": 2}))
         _, _, page = self.call("GET", f"/r/{code}/events?after=1", auth=code)
         self.assertEqual(page["frames"][0]["role"]["viewer"], "owner",
@@ -1167,8 +1567,11 @@ class RelayContract(unittest.TestCase):
         _, _, snap = self.call("GET", f"/r/{code}", auth=code)
         self.assertIsNone(snap["agents"][0]["role"])
         self._advance(31)
-        status, _, out = self.call("PUT", path, auth=code, body={"role": "🙂" * 60, "viewer": "v"})
+        status, _, out = self.call("PUT", path, auth=token, body={"role": "🙂" * 60})
         self.assertEqual(status, 200, out)
+        _, _, page = self.call("GET", f"/r/{code}/events?after=3", auth=code)
+        self.assertEqual(page["frames"][0]["role"]["viewer"], "owner",
+                         "the agent's own token forces viewer to owner as well")
 
     # -- §3.12 policy ---------------------------------------------------------
 
@@ -1201,8 +1604,7 @@ class RelayContract(unittest.TestCase):
         b = self._register(room, "agent-b")
         code = room["room"]
         rows = [self._post_ok(room, a, [_ev()])["rseq"] for _ in range(3)]      # 1 2 3
-        self.call("POST", f"/r/{code}/asks", auth=code, body={"to": "agent-a", "text": "q",
-                                                              "viewer": "v"})       # 4
+        self._message(room, code, to="agent-a", text="q", viewer="v")              # 4
         rows.append(self._post_ok(room, b, [_ev()])["rseq"])                       # 5
         rows.append(self._post_ok(room, a, [_ev()])["rseq"])                       # 6
         for query in ("", "after=0&before=1", "after=x", "before=-1", "after=0&limit=0",
@@ -1212,6 +1614,7 @@ class RelayContract(unittest.TestCase):
         _, _, out = self.call("GET", f"/r/{code}/events?after=0", auth=code)
         self.assertEqual(([f["rseq"] for f in out["frames"]], out["more"], out["rseq"]),
                          ([1, 2, 3, 4, 5, 6], False, 6))
+        self.assertEqual(out["frames"][3]["t"], "message")
         _, _, out = self.call("GET", f"/r/{code}/events?after=1&limit=2", auth=code)
         self.assertEqual(([f["rseq"] for f in out["frames"]], out["more"]), ([2, 3], True))
         _, _, out = self.call("GET", f"/r/{code}/events?before=6&limit=2", auth=code)
@@ -1236,17 +1639,23 @@ class RelayContract(unittest.TestCase):
         token = self._register(room, "agent-a")
         code, join = room["room"], room["join_code"]
         _, _, minted = self.call("POST", f"/r/{code}/ticket", auth=code)
-        resp = None
+        resp = listener = None
         if self.sse:
             resp = self._stream(room, auth=code)
             self._until_live(resp)
+            listener = self._agent_stream(room, token)
+            self._frames(listener, lambda f: f["t"] == "agent")
         status, _, out = self.call("DELETE", f"/r/{code}", auth=join)
         self.assertEqual((status, out), (204, b""))
-        if resp is not None:
-            _, frame = self._frames(resp, lambda f: True)[-1]
-            self.assertEqual(frame, {"t": "gone"})
-            self.assertTrue(self._at_eof(resp), "gone is followed by close")
+        for open_stream in (resp, listener):
+            if open_stream is not None:
+                # The viewer still holds the listener's connect flip (an agent frame).
+                frames = [f for _, f in self._frames(open_stream, lambda f: f.get("t") == "gone")]
+                self.assertTrue(all(f["t"] == "agent" for f in frames[:-1]), frames)
+                self.assertEqual(frames[-1], {"t": "gone"})
+                self.assertTrue(self._at_eof(open_stream), "gone is followed by close")
         for method, path, auth in (("GET", f"/r/{code}", code), ("POST", f"/r/{code}/events", token),
+                                   ("POST", f"/r/{code}/messages", token),
                                    ("POST", f"/r/{code}/prune", join), ("DELETE", f"/r/{code}", join),
                                    ("GET", f"/r/{code}/stream?ticket={minted['ticket']}", None)):
             status, _, out = self.call(method, path, auth=auth, body={} if method == "POST" else None)
@@ -1273,8 +1682,7 @@ class RelayContract(unittest.TestCase):
         token = self._register(room, "agent-a")
         code, join = room["room"], room["join_code"]
         self._post_ok(room, token, [_ev()])                                                  # 1
-        self.call("POST", f"/r/{code}/asks", auth=code, body={"to": "agent-a", "text": "q",
-                                                              "viewer": "v"})                # 2
+        self._message(room, code, to="agent-a", text="q", viewer="v")                        # 2
         self.call("PUT", f"/r/{code}/roles/agent-a", auth=code, body={"role": "r", "viewer": "v"})  # 3
         self.call("PUT", f"/r/{code}/policy", auth=join, body={"max_stream": "full"})             # 4
         self._advance(6 * 60)
@@ -1284,9 +1692,9 @@ class RelayContract(unittest.TestCase):
         _, _, page = self.call("GET", f"/r/{code}/events?after=0", auth=code)
         self.assertEqual([f["rseq"] for f in page["frames"]], [5], "rows of every kind age out")
         _, _, snap = self.call("GET", f"/r/{code}", auth=code)
-        self.assertEqual(([x["seq"] for x in snap["asks"]], snap["agents"][0]["role"]["set_seq"],
+        self.assertEqual(([x["seq"] for x in snap["messages"]], snap["agents"][0]["role"]["set_seq"],
                           snap["policy"]["max_stream"], snap["rseq"]), ([2], 3, "full", 5),
-                         "asks, roles and policy live in their own tables")
+                         "messages, roles and policy live in their own tables")
         if self.sse:
             for after, gap, replayed in ((0, {"before_rseq": 5}, [5]), (3, {"before_rseq": 5}, [5]),
                                          (4, None, [5]), (5, None, [])):
@@ -1300,11 +1708,13 @@ class RelayContract(unittest.TestCase):
         status, _, _ = self.call("POST", f"/r/{code}/prune", auth=join)
         self.assertIn(status, (204, 404), "the periodic pass may have wiped it first")
         if self.sse:
-            # The ask (default ask_ttl_s, one day) expires on the same pass, so an
-            # expired ask frame precedes gone; gone is the last frame before close.
+            # gone is the last frame before close; whether the ask's expiry frame
+            # (ask_ttl_s one day) precedes it or the message was already seven
+            # days old and deleted depends on the pass's order, which is not fixed.
             frames = [f for _, f in self._frames(resp, lambda f: f.get("t") == "gone")]
-            self.assertEqual([f["t"] for f in frames], ["ask", "gone"])
-            self.assertEqual(frames[0]["ask"]["state"], "expired")
+            self.assertEqual(frames[-1], {"t": "gone"})
+            self.assertTrue(all(f["t"] == "message" and f["message"]["state"] == "expired"
+                                for f in frames[:-1]), frames)
             self.assertTrue(self._at_eof(resp))
         status, _, out = self.call("GET", f"/r/{code}", auth=code)
         self.assertEqual((status, out["error"]), (404, "room"), "wiped after seven idle days")
@@ -1411,11 +1821,13 @@ class RelayContract(unittest.TestCase):
                              ("https://canvas.example", "https://canvas.example/#" + room["room"]))
             saved_base, RelayContract.base = self.base, base
             try:
-                token = self._register(room, "agent-a")
+                reg = self._register_out(room, "agent-a")
+                token = reg["token"]
                 out = self._post_ok(room, token, [_ev()])
                 self.assertEqual(out["rseq"], 1)
-                self.call("POST", f"/r/{room['room']}/asks", auth=room["room"],
-                          body={"to": "agent-a", "text": "q", "viewer": "v"})
+                self._message(room, room["room"], to="agent-a", text="q", viewer="v")
+                self.call("PUT", f"/r/{room['room']}/agents/agent-a/wake", auth=reg["owner_token"],
+                          body={"enabled": True})
                 first.shutdown()
                 self.assertTrue((Path(tmp) / "rooms.json").exists())
                 second = canvas_relay.Relay(("127.0.0.1", 0), state_dir=tmp)
@@ -1423,9 +1835,13 @@ class RelayContract(unittest.TestCase):
                 RelayContract.base = f"http://127.0.0.1:{second.port}"
                 status, _, snap = self.call("GET", f"/r/{room['room']}", auth=room["room"])
                 self.assertEqual((status, snap["rseq"], snap["agents"][0]["name"],
-                                  [x["seq"] for x in snap["asks"]]), (200, 2, "agent-a", [2]))
+                                  [x["seq"] for x in snap["messages"]],
+                                  snap["agents"][0]["wake"]["enabled"]), (200, 2, "agent-a", [2], True))
                 out = self._post_ok(room, token, [_ev()])
                 self.assertEqual(out["rseq"], 3, "tokens, rows and the counter survive a restart")
+                status, _, out = self.call("PUT", f"/r/{room['room']}/agents/agent-a/wake",
+                                           auth=reg["owner_token"], body={"from": "room"})
+                self.assertEqual(status, 200, "the owner token survives too")
                 _, _, page = self.call("GET", f"/r/{room['room']}/events?after=0", auth=room["room"])
                 self.assertEqual([f["rseq"] for f in page["frames"]], [1, 2, 3])
                 status, _, _ = self.call("POST", f"/r/{room['room']}/prune", auth=room["join_code"])

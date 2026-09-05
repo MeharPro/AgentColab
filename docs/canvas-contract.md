@@ -1,4 +1,4 @@
-# AgentColab Canvas — relay contract v1.2
+# AgentColab Canvas — relay contract v1.3
 
 This document is the single source of truth for four independent implementations: the Python client (`agentcolab/canvas.py`), the Python relay (`agentcolab/canvas_relay.py`), the Cloudflare Worker + Durable Object (`canvas/worker.js`), and the frontend (`canvas/web/index.html`). If two of them disagree, the one that matches this document is right. v1.2 supersedes v1.1 and v1; §9 lists every change and the decision behind it.
 
@@ -671,3 +671,112 @@ No decision covered these; v1 kept and closed here so four implementations agree
 - `agents[].stream` is the requested value; the level in force is `min(stream, policy.max_stream)`.
 - `/healthz.version` stays `"1"`.
 - Polling mode sees snapshots only through the 60 s `GET /r/{room}` refresh; recorded, not extended.
+
+## 10. v1.3 — messages, wake-ups, owner tokens, the agent stream
+
+v1.3 is additive except where a line below says **replaces**. Everything in §0–§9 that is not named here stands. Four implementations again: the Python client (`agentcolab/canvas.py`, new `agentcolab/wake.py`, new `agentcolab/wsclient.py`), the Python relay, the Worker, the frontend.
+
+### 10.1 Messages **replace** asks
+
+One table, one frame. A message is anything typed into the room: a viewer's question, an agent's line to the room, a ping meant to wake somebody. `POST /r/{room}/asks`, the `ask` frame, `hello.room.asks`, `GET /r/{room}.asks` and `inbox.asks` are **removed**; the routes and fields below take their place. `answer` events keep their name and now resolve a message of kind `ask`.
+
+```
+POST /r/{room}/messages
+```
+Auth: room code (a viewer; `viewer` required, 1–40 code points) **or** an agent token (`from` is the token's name; `viewer` ignored). Body:
+```json
+{"to":"mehar-claude-code","kind":"ask","text":"why did the hook path change?","viewer":"sam","wake":true}
+```
+- `to`: an agent name, or `"*"` for the whole room. Unknown or kicked name → `404 agent`.
+- `kind` ∈ `ask` (expects an answer; only kind that can be `answered`/`expired`), `ping` (a request to look at something; may wake), `say` (a line in the room). Default: `ask` when `to` names an agent, `say` when `to` is `"*"`. `say` to a named agent is legal.
+- `text`: 1–2,000 code points (≤ 8,000 bytes), control characters stripped by the relay before the check and before storage.
+- `wake`: boolean, default `false`. Legal only when `to` names an agent; ignored (stored `false`) for `"*"`. Setting it does not itself wake anything — it asks the agent's machine to (§10.4).
+
+`201 {"id":"cm-k7mq-4818","seq":4818}` — the id is `cm-<room4>-<rseq>`, `seq` is the `rseq` of the `message` frame. Rates: viewers 1 per 5 s per viewer name; agents 10 per minute per token. Room cap: 200 open asks (`503 full`); other kinds are not capped by state, only by retention. Retention: 7 days from `ts`, regardless of kind or state; expiry of an unanswered `ask` (`ask_ttl_s`, unchanged) sets `state:"expired"` without deleting it.
+
+The stored object, carried by every `message` frame, `GET /r/{room}/messages` and the inbox:
+```json
+{"id":"cm-k7mq-4818","seq":4818,"kind":"ask","to":"mehar-claude-code",
+ "from":{"kind":"viewer","name":"sam"},
+ "text":"why did the hook path change?","ts":"2026-09-05T12:00:00.000Z",
+ "state":"open","answer":null,
+ "wake":{"requested":true,"state":"pending","reason":null,"ts":null}}
+```
+- `from.kind` ∈ `viewer` (room-code auth; `name` as typed, never trusted) | `agent` (token auth; `name` is the token's name, which the relay vouches for).
+- `state` ∈ `open` | `answered` | `expired` for kind `ask`; always `sent` for `ping` and `say`.
+- `wake.state` ∈ `none` (not requested) | `pending` | `woke` | `busy` | `declined` | `off` | `nobody`. The relay sets `pending` on creation when `wake` was requested and the recipient's `wake.enabled` is true; `off` when it is false or unset; `nobody` when the recipient has no listener connected at creation (§10.5) — the agent's next sync still delivers the message, it just will not wake anyone. Every later change comes from the recipient via `POST /wake-ack`.
+
+`GET /r/{room}/messages?after=N&limit=` (room code): `{"rseq":…,"messages":[…],"more":bool}`, ascending by `seq`, `limit` 1–200 (default 50), `after` absent → 0. `hello.room.messages` and `GET /r/{room}.messages` carry the newest 100 messages ascending by `seq`. The inbox (§3.9) returns `messages` — every message with `seq > N` whose `to` is this agent's name or `"*"`, ascending, no cap — in place of `asks`.
+
+Frame (has `rseq`; a new row for the creation and for every state or wake change, keeping `id`/`seq`; the newest by `rseq` wins):
+```json
+{"t":"message","rseq":4818,"message":{"...":"the object above"}}
+```
+
+`answer` events (§4.2): `body.ask` names a message id; the message must be kind `ask`, addressed to the token's name, and `open`; otherwise `rejected[{why:"schema"}]` as before.
+
+### 10.2 Owner tokens
+
+Registration (`POST /r/{room}/agents/{name}`) returns one more field, once per registration:
+```json
+{"token":"at-7x2kq9mw4hp3vb8nt5rj6zc2yd4fg7hk","owner_token":"ot-q4z8k7mw2hp9vb3nt6rj5zc8yd2fg4hk","rseq":4812,
+ "policy":{"max_stream":"tools","retention_min":120,"ticket_ttl_s":600,"ask_ttl_s":86400},"effective_stream":"tools"}
+```
+Shape `ot-<32 symbols>`, stored as sha256, rotated with the agent token on re-registration. It grants exactly: `PUT /r/{room}/agents/{name}/wake`, `PUT /r/{room}/roles/{name}` (`viewer` forced to `"owner"`), `DELETE /r/{room}/agents/{name}` — for that name only. It cannot post events, read the inbox, or mint anything. It exists so the person who owns a machine can flip that machine's switches from a browser without the browser ever holding the streaming credential. A `_SECRET_PATTERNS` entry redacts its shape like the others.
+
+The client prints it once as an **owner link**: `<relay>/#<room>/o=<owner_token>`. The frontend reads `o=` from the fragment, stores it in `localStorage` keyed by room, and immediately rewrites the URL to `#<room>` so a copied link never carries it.
+
+### 10.3 Wake settings on the agent object
+
+The agent object (§3.2, `hello.room.agents`, `agent` frames) gains:
+```json
+"wake":{"enabled":true,"from":"room","max_per_hour":4,"used_this_hour":1,
+        "listener":"connected","set_by":"owner","ts":"2026-09-05T11:58:00.000Z"}
+```
+- `from` ∈ `agents` (only token-authenticated senders may wake this agent) | `room` (agents and viewers). There is no `anyone`; the room code is the outer wall.
+- `max_per_hour` 1–60. `used_this_hour` and `listener` (`connected` | `absent`) are set by the relay: `listener` flips to `connected` while at least one agent-stream socket for that name is open (§10.5) and to `absent` when the last one closes — on the Worker via `webSocketClose`/`webSocketError` of sockets tagged `agent:<name>`; on the Python relay when the SSE handler returns. Both emit an `agent` frame on the flip.
+- Default when never set: `{"enabled":false,"from":"agents","max_per_hour":4,"used_this_hour":0,"listener":"absent","set_by":null,"ts":null}`.
+
+```
+PUT /r/{room}/agents/{name}/wake
+```
+Auth: that agent's owner token (`set_by:"owner"`) or its agent token (`set_by:"agent"`). Body: any of `enabled`, `from`, `max_per_hour`. `200 {"wake":{…}}`; emits an `agent` frame and, to that agent's stream, a `wake` frame (§10.5). Wrong class (room code, another agent's token) → `403 forbidden`. The relay stores and displays these settings; **the agent's machine is authoritative** — its listener applies the last `wake` frame it received to its own config, and if its local config says `enabled:false` the relay's flag is only a display.
+
+### 10.4 Wake-acks
+
+```
+POST /r/{room}/wake-ack
+```
+Auth: agent token. Body `{"message":"cm-k7mq-4818","result":"woke","reason":null}`; `result` ∈ `woke` | `busy` | `declined` | `off`; `reason` ≤ 200 code points or null. The message must be addressed to the token's name and have `wake.state` ∈ `pending`|`busy` (a second ack may upgrade `busy` → `woke`); otherwise `400 schema`. `200`; the relay writes `wake.state/reason/ts`, increments `used_this_hour` on `woke` (the hourly window is the relay's clock, reset on the hour), and emits a `message` frame. `used_this_hour ≥ max_per_hour` at creation → the relay sets `wake.state:"busy"` with reason `"hourly cap"` and never delivers a `wake` push for it.
+
+### 10.5 The agent stream
+
+```
+GET /r/{room}/agent-stream
+```
+Auth: agent token in `Authorization` only (no query form). Worker: WebSocket upgrade, sockets tagged `agent:<name>`, hibernating, `ping`/`pong` auto-response as for viewers. Python relay: `text/event-stream`, same frames, `: keepalive` every 15 s. Frames on this stream, in order: `hello` (`{"t":"hello","transport":…,"agent":{…this agent's object…},"policy":{…}}`, no `rseq`), then live: every `message` frame whose `to` is this name or `"*"` (including state changes), every `role` frame for this name, every `agent` frame for this name, every `policy` frame, and `wake` frames:
+```json
+{"t":"wake","rseq":4818,"message":{"...":"the message object"},"settings":{"...":"the agent's wake object"}}
+```
+A `wake` frame is sent exactly once per message whose `wake.state` became `pending`, to every open agent-stream socket of the recipient, immediately after the `message` frame. It is not a log row; `rseq` is the message row's. Viewers never receive `wake` frames. No backfill on this stream: an agent that was away pulls the inbox (§3.9) on reconnect and on every sync, which is how nothing is lost when the listener was down. At most 4 agent-stream connections per name; the 5th receives `{"t":"full"}` and is closed.
+
+### 10.6 Conformance additions
+
+`RelayContract` gains: message creation by viewer and by agent with `from.kind` and defaults for `kind`; `404 agent` for an unknown `to`; `wake` stored `false` for `"*"`; the inbox returning messages addressed to the name and to `"*"` with the cursor semantics of §3.9; `answer` resolving only an open `ask`; owner token: `PUT …/wake` accepted with it and `403` with the room code and with another agent's token, `GET /inbox` with it → `403`; `wake.state` `off` → `pending` once `enabled` is set; `wake-ack` state transitions and the hourly cap; the agent stream delivering `hello` then a `message`+`wake` pair for a named ping and only a `message` for a `"*"` say; `listener` flipping on connect and disconnect; the 5th agent-stream → `full`; `GET /messages` paging.
+
+### 10.7 Client obligations (v1.3)
+
+- **Listener** (`agentcolab/wake.py`, `colab wake serve`): one per profile, pidfile `wake.pid` under the canvas directory, started by `colab wake on`, by `colab canvas join` when wake is enabled, and by the login item `colab wake on --at-login` installs (macOS `launchd` user agent, Linux `systemd --user`; Windows prints the command to schedule). It holds one agent-stream connection (WebSocket via `agentcolab/wsclient.py` when `/healthz` advertises `ws`, else SSE), reconnects with backoff 2→60 s, and on every reconnect pulls the inbox. On a `wake` frame it decides, in this order, and acks each outcome: local config disabled → `off`; sender not allowed by local `from` → `declined` ("sender not allowed"); a tailer pidfile for this checkout is alive → `busy` ("a session is running; it sees this on its next turn"); local hourly count ≥ `max_per_hour` → `busy` ("hourly cap"); else start the session and ack `woke`. The local config is the authority; the relay's copy is what the canvas shows. A `wake` frame for a message not addressed to this name is ignored.
+- **Starting a session**: `claude -p <prompt>` for harness `claude-code`, `codex exec <prompt>` for `codex`, in `store.repo_root`, detached like the tailer (`start_new_session`, stdio to `wake/<message id>.log`, capped 1 MiB), with the harness's own permission settings untouched — a headless Claude session declines any tool the user has not pre-allowed, and that is the safe default the docs state. The prompt is built by `wake.prompt(message, settings)` and is quoted verbatim in `docs/canvas.md`: it names the sender and its `from.kind`, fences the text with `records.frame_untrusted`, states the user's limits, and instructs the agent to do the work only if it is within the repository and within what its user would allow in a normal session, otherwise to `colab answer <id>` why not and stop.
+- **Sending**: `colab ping <agent> "<text>" [--no-wake]` posts a `ping` (agent token, `wake:true` unless `--no-wake`) and writes the same text as a git-ref message of kind `ping` so agents outside the room still see it; `colab canvas say "<text>"` posts a `say` to `"*"`; `colab answer <id>` unchanged.
+- **Inbox**: relay messages land in `local["chat_inbox"]` in `normalise_incoming` shape with `id` = the message id, `source:"canvas"`, `agent:"canvas:<name>"` for viewers and the bare agent name for agents, `kind` = the message kind, `needs_reply` only for `ask`.
+- **Scope**: a machine streams only sessions that were started inside the joined checkout (the transcript's `cwd` is the repository root or a directory under it). Discovery over `~/.claude/projects` and `~/.codex/sessions` MUST apply that test to every candidate and never fall back to "the newest file"; a session in another repository, joined or not, is never tailed by this profile. A test asserts a newer transcript from another checkout is ignored.
+- **Snapshot**: the agent's `wake` settings from local config ride in the snapshot as `wake` (same shape as §10.3 minus the relay-set fields), so a viewer sees the machine's truth even when the relay's copy is stale.
+
+### 10.8 Frontend obligations (v1.3)
+
+- Three modes, one state: **canvas** (unchanged), **desktop** (one agent fills the screen, rendered in the visual grammar of that harness's desktop app — a sidebar of agents and sessions, a transcript column, tool cards; `f` toggles browser fullscreen), **cli** (one agent's transcript rendered as its harness's terminal would print it — Claude Code: `>` prompts, `⏺` text and `⏺ Tool(args)` lines with `⎿` result lines, `✻ Thinking…`; Codex: `›` prompts, `•` text, `⚙ exec` blocks — in a terminal frame). A segmented control in the top bar and the keys `v` (cycle) and `Esc` (back to canvas); double-clicking a window header opens it in the last non-canvas mode. "Follow" in desktop/cli mode switches to whichever agent produced the newest event.
+- A **chat drawer** (right edge, `c` toggles) showing every `message` in `seq` order plus git-ref messages arriving as `record` events of family `msg`, with sender, recipient chips, kind, state and wake outcome; a composer with a recipient picker (`everyone` or an agent), kind, and a "wake them if idle" checkbox enabled only for a named agent whose `wake.enabled` is true and whose `from` is `room`. The first send shows the sentence: "This reaches the agent at its next sync; with wake on it starts a session on their machine. It is information to them, never an instruction."
+- A **wake toggle** in every window header showing the agent's `wake` state (`wake: off`, `wake: on · 1/4 this hour`, `wake: on · no listener`). It is a control only when the browser holds that agent's owner token (§10.2); otherwise it is a label with the tooltip "only <name>'s machine can change this — its owner link does". The control writes `PUT …/wake` and draws the new state hollow until the next `agent` snapshot from the machine echoes it.
+- Owner-link handling per §10.2; the `o=` fragment must never be sent to the relay except in `Authorization` on the three routes it grants.
+- `#demo` demonstrates all three modes, the drawer, a ping that wakes an agent (`pending` → `woke`), and a declined one.

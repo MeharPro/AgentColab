@@ -12,13 +12,15 @@
     "keeps its character without anybody writing code for it. Run",
     "`colab channels --full` to read them, `colab say <channel> \"...\"` to post.",
     "",
-    "`canvas` is the live view. `colab canvas export` writes its public half here:",
-    "  \"canvas\": { \"relay\": \"https://agentcolab-canvas.dizon-dzn12.workers.dev\" }",
-    "plus the room code, which is a bearer token to a live transcript, so decide",
-    "before you commit it. A join code belongs here only with --with-join-code and",
-    "only in a private repo; an agent token never. The relay above is a placeholder",
-    "until the maintainer publishes the real one; docs/canvas.md says how to host",
-    "your own. Nothing streams until a machine runs `colab canvas join`."
+    "`canvas` is the live view, the chat drawer and wake-ups. `colab canvas export`",
+    "writes its public half into this file (`--stdout` prints it instead):",
+    "  \"canvas\": { \"relay\": \"https://agentcolab-canvas.dizon-dzn12.workers.dev\", \"room\": \"...\" }",
+    "The room code is a bearer token to a live transcript, so decide before you",
+    "commit it. A join code belongs here only with --with-join-code and only in a",
+    "private repo; an agent token or an owner link never. The relay above is the",
+    "one this project runs and the default when nothing else is configured;",
+    "docs/canvas.md says how to host your own. Nothing streams until a machine runs",
+    "`colab canvas join`, and nothing wakes until its owner runs `colab wake on`."
   ],
   "chat": {
     "drivers": [],

@@ -6,6 +6,10 @@ implementation the Worker, the client and the frontend are held to, and so
 viewer sees is a frame from the room log; the relay validates, rejects or stores
 an event and never edits one (contract §0, §6.3), because two backends that
 alter the same input differently are two contracts.
+
+v1.3 (§10) adds the message table that replaced asks, owner tokens, the wake
+settings on every agent object, wake-acks, and a second SSE stream -- the agent
+stream -- that a machine's listener holds so a ping can start a session there.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import hmac
 import json
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -29,13 +34,14 @@ from typing import Any, Callable, Iterable
 
 from . import records
 
-# ---------------------------------------------------------------- limits (§2)
+# ---------------------------------------------------------------- limits (§2, §10)
 
 ALPHABET = "23456789abcdefghjkmnpqrstvwxyz"
 _SYM = "[" + ALPHABET + "]"
 ROOM_RE = re.compile(f"^{_SYM}{{4}}-{_SYM}{{4}}-{_SYM}{{2}}$")
 JOIN_RE = re.compile(f"^{_SYM}{{4}}-{_SYM}{{4}}-{_SYM}{{2}}\\.{_SYM}{{24}}$")
 TOKEN_RE = re.compile(f"^at-{_SYM}{{32}}$")
+OWNER_RE = re.compile(f"^ot-{_SYM}{{32}}$")
 TICKET_RE = re.compile(f"^vt-{_SYM}{{32}}$")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 # Single-line human fields: everything below 0x20 (tab and newline included)
@@ -52,11 +58,14 @@ TAIL_BYTES = 256 << 10
 REPLAY_BYTES = 2 << 20
 MAX_AGENTS = 12
 MAX_VIEWERS = 25
-MAX_OPEN_ASKS = 40
-CLOSED_ASKS_SHOWN = 40
+MAX_AGENT_STREAMS = 4
+MAX_OPEN_ASKS = 200
+MESSAGES_SHOWN = 100
 MAX_RECORDS = 2_000
 RECORDS_PER_FRAME = 200
-ASK_GAP_S = 5
+VIEWER_MESSAGE_GAP_S = 5
+AGENT_MESSAGES_PER_MIN = 10
+MESSAGE_TTL_S = 7 * 86_400
 ROLE_GAP_S = 30
 BUCKET_RATE = 2.0
 BUCKET_BURST = 10.0
@@ -77,9 +86,14 @@ POLICY_RANGES = {"retention_min": (5, 720), "ticket_ttl_s": (1, 3600), "ask_ttl_
 POLICY_KEYS = ("max_stream", "retention_min", "ticket_ttl_s", "ask_ttl_s")
 DEFAULT_POLICY = {"max_stream": "tools", "retention_min": 120, "ticket_ttl_s": 600,
                   "ask_ttl_s": 86_400}
+MESSAGE_KINDS = ("ask", "ping", "say")
+WAKE_KEYS = ("enabled", "from", "max_per_hour")
+WAKE_FROM = ("agents", "room")
+WAKE_RESULTS = ("woke", "busy", "declined", "off")
+DEFAULT_WAKE = {"enabled": False, "from": "agents", "max_per_hour": 4}
 
 _CLASS_NAMES = {"room": "a room code", "join": "a join code", "token": "an agent token",
-                "ticket": "a viewer ticket"}
+                "owner": "an owner token", "ticket": "a viewer ticket"}
 
 PLACEHOLDER_HTML = (b"<!doctype html><meta charset=utf-8><title>AgentColab canvas</title>"
                     b"<p>The relay is up; the canvas frontend (canvas/web/index.html) is not"
@@ -123,6 +137,8 @@ def _classify(value: str) -> str | None:
         return "join"
     if TOKEN_RE.match(value):
         return "token"
+    if OWNER_RE.match(value):
+        return "owner"
     if TICKET_RE.match(value):
         return "ticket"
     return None
@@ -153,8 +169,13 @@ def _instant(value: Any) -> float | None:
 
 
 def _is_int(value: Any) -> bool:
-    # bool is an int subclass; `true` must not pass as 1.
-    return isinstance(value, int) and not isinstance(value, bool)
+    # bool is an int subclass; `true` must not pass as 1. An integral float
+    # does pass: JSON has one number type and the Worker's Number.isInteger
+    # accepts `1.0`, so a client whose serialiser writes it must get the same
+    # answer from both backends.
+    if isinstance(value, bool):
+        return False
+    return isinstance(value, int) or (isinstance(value, float) and value.is_integer())
 
 
 def _nonneg(text: str | None) -> int | None:
@@ -190,13 +211,12 @@ def _validate_policy(body: Any, current: dict[str, Any]) -> dict[str, Any]:
         if key == "max_stream":
             if value not in STREAMS:
                 raise _Reply(400, "schema", "max_stream must be summary, tools or full")
+            policy[key] = value
         elif key in POLICY_RANGES:
             lo, hi = POLICY_RANGES[key]
             if not _is_int(value) or not lo <= value <= hi:
                 raise _Reply(400, "schema", f"{key} must be an integer from {lo} to {hi}")
-        else:
-            continue
-        policy[key] = value
+            policy[key] = int(value)
     return policy
 
 
@@ -273,6 +293,8 @@ class _Row:
 
 
 class _Viewer:
+    """One open SSE connection -- a viewer's `/stream` or an agent's `/agent-stream`."""
+
     __slots__ = ("queue", "cond", "closed")
 
     def __init__(self, cond: threading.Condition) -> None:
@@ -297,13 +319,15 @@ class _Room:
         self.roles: dict[str, dict[str, Any] | None] = {}
         self.role_seq: dict[str, int] = {}
         self.role_at: dict[str, float] = {}
-        self.asks: dict[str, dict[str, Any]] = {}
-        self.ask_at: dict[str, float] = {}
+        self.messages: dict[str, dict[str, Any]] = {}
+        self.viewer_at: dict[str, float] = {}
+        self.agent_message_at: dict[str, list[float]] = {}
         self.tickets: dict[str, float] = {}
         self.records: dict[str, dict[str, Any]] = {}
         self.rids: dict[str, str] = {}
         self.buckets: dict[str, list[float]] = {}
         self.viewers: list[_Viewer] = []
+        self.agent_streams: dict[str, list[_Viewer]] = {}
 
     @property
     def room4(self) -> str:
@@ -315,7 +339,7 @@ class _Room:
                 "last_batch_at": self.last_batch_at, "rseq": self.rseq,
                 "horizon": self.horizon, "log": [row.to_json() for row in self.log],
                 "agents": self.agents, "roles": self.roles, "role_seq": self.role_seq,
-                "asks": self.asks, "tickets": self.tickets,
+                "messages": list(self.messages.values()), "tickets": self.tickets,
                 "records": list(self.records.values())}
 
     @classmethod
@@ -328,7 +352,10 @@ class _Room:
         room.agents = data.get("agents", {})
         room.roles = data.get("roles", {})
         room.role_seq = {k: int(v) for k, v in data.get("role_seq", {}).items()}
-        room.asks = data.get("asks", {})
+        # A v1.2 state file carries `asks`; they have no place in the message table
+        # and are dropped rather than guessed at.
+        for message in data.get("messages", []):
+            room.messages[message["id"]] = message
         room.tickets = {k: float(v) for k, v in data.get("tickets", {}).items()}
         for row_data in data.get("log", []):
             row = _Row.from_json(row_data)
@@ -382,9 +409,9 @@ class Relay:
         self._stop.set()
         with self._lock:
             for room in self.rooms.values():
-                for viewer in room.viewers:
-                    viewer.closed = True
-                    viewer.cond.notify_all()
+                for stream in self._streams(room):
+                    stream.closed = True
+                    stream.cond.notify_all()
         # HTTPServer.shutdown() waits for a serve_forever() loop to notice; on a
         # relay that never served it would wait forever.
         if self._serving:
@@ -445,9 +472,9 @@ class Relay:
                          "the last batch -- create one with POST /rooms")
         return room
 
-    def _agent_by_token(self, room: _Room, digest: str) -> str | None:
+    def _agent_by_hash(self, room: _Room, digest: str, key: str) -> str | None:
         for name, agent in room.agents.items():
-            stored = agent.get("token_hash")
+            stored = agent.get(key)
             if stored and hmac.compare_digest(stored, digest):
                 return name
         return None
@@ -482,10 +509,16 @@ class Relay:
                 raise _Reply(401, "auth", "unknown join code for this room")
             return cls, None
         if cls == "token":
-            name = self._agent_by_token(room, _sha(value))
+            name = self._agent_by_hash(room, _sha(value), "token_hash")
             if name is None:
                 raise _Reply(401, "auth", "unknown, rotated or kicked agent token; "
                              "re-register with the join code")
+            return cls, name
+        if cls == "owner":
+            name = self._agent_by_hash(room, _sha(value), "owner_hash")
+            if name is None:
+                raise _Reply(401, "auth", "unknown, rotated or kicked owner token; "
+                             "re-registering the agent prints a new owner link")
             return cls, name
         if not self._ticket_valid(room, value):
             raise _Reply(401, "auth", "unknown or expired viewer ticket; mint another "
@@ -494,42 +527,90 @@ class Relay:
 
     # -- shapes ----------------------------------------------------------
 
+    def _wake_used(self, agent: dict[str, Any]) -> int:
+        # The hourly window is the relay's wall clock, reset on the hour (§10.4).
+        hour = int(self.clock() // 3600)
+        return int(agent.get("wake_used", 0)) if agent.get("wake_hour") == hour else 0
+
+    def _count_wake(self, agent: dict[str, Any]) -> None:
+        agent["wake_used"] = self._wake_used(agent) + 1
+        agent["wake_hour"] = int(self.clock() // 3600)
+
+    def _wake_object(self, room: _Room, name: str) -> dict[str, Any]:
+        agent = room.agents[name]
+        settings = agent.get("wake") or {}
+        connected = any(not s.closed for s in room.agent_streams.get(name, ()))
+        return {"enabled": bool(settings.get("enabled", DEFAULT_WAKE["enabled"])),
+                "from": settings.get("from", DEFAULT_WAKE["from"]),
+                "max_per_hour": settings.get("max_per_hour", DEFAULT_WAKE["max_per_hour"]),
+                "used_this_hour": self._wake_used(agent),
+                "listener": "connected" if connected else "absent",
+                "set_by": settings.get("set_by"), "ts": settings.get("ts")}
+
     def _agent_object(self, room: _Room, name: str) -> dict[str, Any]:
         agent = room.agents[name]
         return {"name": name, "harness": agent["harness"], "human": agent["human"],
                 "model": agent["model"], "stream": agent["stream"],
                 "registered_at": agent["registered_at"], "last_seen": agent["last_seen"],
                 "kicked": bool(agent["kicked"]), "role": room.roles.get(name),
-                "snapshot": agent.get("snapshot")}
+                "snapshot": agent.get("snapshot"), "wake": self._wake_object(room, name)}
 
     @staticmethod
-    def _ask_public(ask: dict[str, Any]) -> dict[str, Any]:
-        return {key: ask[key] for key in ("id", "seq", "to", "viewer", "text", "ts", "state",
-                                          "answer")}
+    def _message_public(message: dict[str, Any]) -> dict[str, Any]:
+        # Fresh nested objects: a frame stored in a row must keep the state it
+        # announced after a later ack or answer mutates the message.
+        return {"id": message["id"], "seq": message["seq"], "kind": message["kind"],
+                "to": message["to"], "from": dict(message["from"]), "text": message["text"],
+                "ts": message["ts"], "state": message["state"],
+                "answer": dict(message["answer"]) if message["answer"] else None,
+                "wake": dict(message["wake"])}
 
-    def _ask_list(self, room: _Room) -> list[dict[str, Any]]:
-        asks = list(room.asks.values())
-        open_asks = [a for a in asks if a["state"] == "open"]
-        closed = sorted((a for a in asks if a["state"] != "open"), key=lambda a: a["seq"])
-        shown = open_asks + closed[-CLOSED_ASKS_SHOWN:]
-        return [self._ask_public(a) for a in sorted(shown, key=lambda a: a["seq"])]
+    def _message_list(self, room: _Room) -> list[dict[str, Any]]:
+        newest = sorted(room.messages.values(), key=lambda m: m["seq"])[-MESSAGES_SHOWN:]
+        return [self._message_public(m) for m in newest]
 
     def _snapshot(self, room: _Room) -> dict[str, Any]:
         return {"room": room.code, "name": room.name, "rseq": room.rseq,
                 "policy": dict(room.policy),
                 "agents": [self._agent_object(room, name) for name in sorted(room.agents)],
-                "asks": self._ask_list(room)}
+                "messages": self._message_list(room)}
 
     # -- the log ---------------------------------------------------------
 
-    def _broadcast(self, room: _Room, frame: dict[str, Any]) -> None:
-        for viewer in room.viewers:
+    @staticmethod
+    def _streams(room: _Room) -> list[_Viewer]:
+        out = list(room.viewers)
+        for streams in room.agent_streams.values():
+            out.extend(streams)
+        return out
+
+    def _broadcast(self, room: _Room, frame: dict[str, Any], *,
+                   agents: str | None = None) -> None:
+        """To every viewer, plus the agent streams of `agents`: a name, or "*" for all."""
+        targets = list(room.viewers)
+        if agents == "*":
+            for streams in room.agent_streams.values():
+                targets.extend(streams)
+        elif agents is not None:
+            targets.extend(room.agent_streams.get(agents, ()))
+        for viewer in targets:
             if not viewer.closed:
                 viewer.queue.append(frame)
                 viewer.cond.notify()
 
+    def _push_agent(self, room: _Room, name: str, frame: dict[str, Any]) -> None:
+        """To that agent's streams only; viewers never receive a wake frame (§10.5)."""
+        for stream in room.agent_streams.get(name, ()):
+            if not stream.closed:
+                stream.queue.append(frame)
+                stream.cond.notify()
+
+    def _emit_agent(self, room: _Room, name: str) -> None:
+        self._broadcast(room, {"t": "agent", "agent": self._agent_object(room, name)}, agents=name)
+
     def _append(self, room: _Room, t: str, payload: dict[str, Any], *, agent: str | None = None,
-                nbytes: int = 0, digest: str | None = None, positional: int = 0) -> _Row:
+                nbytes: int = 0, digest: str | None = None, positional: int = 0,
+                agents: str | None = None) -> _Row:
         room.rseq += 1
         frame = {"t": t, "rseq": room.rseq, **payload}
         row = _Row(room.rseq, t, frame, agent=agent, nbytes=nbytes, digest=digest,
@@ -540,8 +621,13 @@ class Relay:
             room.total_bytes += nbytes
             if digest:
                 room.digests[digest] = row.rseq
-        self._broadcast(room, frame)
+        self._broadcast(room, frame, agents=agents)
         return row
+
+    def _message_row(self, room: _Room, message: dict[str, Any], *, nbytes: int) -> _Row:
+        """One row per creation and per state or wake change, to viewers and the recipient."""
+        return self._append(room, "message", {"message": self._message_public(message)},
+                            nbytes=nbytes, agents=message["to"])
 
     def _delete_rows(self, room: _Room, doomed: set[_Row]) -> None:
         if not doomed:
@@ -638,24 +724,26 @@ class Relay:
             if isinstance(rid, str) and room.rids.get(rid) == held_id:
                 del room.rids[rid]
 
-    def _hold_record(self, room: _Room, ev: dict[str, Any]) -> None:
+    def _hold_record(self, room: _Room, ev: dict[str, Any]) -> bool:
+        """Hold the record, or report False for an older version of a held rid (§6.4)."""
         rid = ev["body"].get("rid")
         if isinstance(rid, str) and rid in room.rids:
             held = room.records[room.rids[rid]]
             new_ts = _instant(ev["body"].get("ts")) or float("-inf")
             old_ts = _instant(held["body"].get("ts")) or float("-inf")
             if new_ts < old_ts:
-                return          # an older version of a record already held (§6.4)
+                return False
             del room.records[room.rids[rid]]
         room.records[ev["id"]] = ev
         if isinstance(rid, str):
             room.rids[rid] = ev["id"]
+        return True
 
     def _wipe(self, room: _Room) -> None:
-        for viewer in room.viewers:
-            viewer.queue.append({"t": "gone"})
-            viewer.closed = True
-            viewer.cond.notify()
+        for stream in self._streams(room):
+            stream.queue.append({"t": "gone"})
+            stream.closed = True
+            stream.cond.notify()
         self.rooms.pop(room.code, None)
 
     def _prune(self, room: _Room, now: float) -> None:
@@ -665,13 +753,19 @@ class Relay:
             self._enforce_bytes(room, name)
         room.tickets = {digest: expires for digest, expires in room.tickets.items()
                         if expires > now}
-        expiring = sorted((ask for ask in room.asks.values()
-                           if ask["state"] == "open" and ask["expires_at"] <= now),
-                          key=lambda ask: ask["seq"])
-        for ask in expiring:
-            ask["state"] = "expired"
-            public = self._ask_public(ask)
-            self._append(room, "ask", {"ask": public}, nbytes=len(_json_bytes(public)))
+        # Messages live seven days from their ts whatever their kind or state
+        # (§10.1); an ask past ask_ttl_s expires but stays until then.
+        for mid in [m["id"] for m in room.messages.values()
+                    if now - m["created_at"] >= MESSAGE_TTL_S]:
+            del room.messages[mid]
+        expiring = sorted((m for m in room.messages.values()
+                           if m["kind"] == "ask" and m["state"] == "open"
+                           and m["expires_at"] <= now),
+                          key=lambda m: m["seq"])
+        for message in expiring:
+            message["state"] = "expired"
+            self._message_row(room, message,
+                              nbytes=len(_json_bytes(self._message_public(message))))
         self._trim_records(room)
         if now - room.last_batch_at > IDLE_WIPE_S:
             self._wipe(room)
@@ -714,9 +808,12 @@ class Relay:
         if _breaks_policy(kind, parsed["body"], level):
             return None, ident, "policy"
         if kind == "answer":
-            ask_id = parsed["body"].get("ask")
-            ask = room.asks.get(ask_id) if isinstance(ask_id, str) else None
-            if ask is None or ask["to"] != name:
+            # Only an open ask addressed to this agent resolves (§10.1); anything
+            # else is the client's mistake, reported like a missing field.
+            mid = parsed["body"].get("ask")
+            message = room.messages.get(mid) if isinstance(mid, str) else None
+            if (message is None or message["kind"] != "ask" or message["to"] != name
+                    or message["state"] != "open"):
                 return None, ident, "schema"
         return parsed, ident, None
 
@@ -741,7 +838,7 @@ class Relay:
         stored: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
         answered: list[dict[str, Any]] = []
-        accepted = dup = snapshots = 0
+        accepted = dup = 0
         for line in lines:
             ev, ident, why = self._check_event(room, name, line, level)
             if why or ev is None:
@@ -751,19 +848,22 @@ class Relay:
             if kind == "agent":
                 agent["snapshot"] = ev["body"]
                 accepted += 1
-                snapshots += 1
+                # One frame per snapshot, carrying the snapshot as of that event
+                # and sent ahead of the batch row, as the Worker does: two
+                # snapshots in one batch must reach a viewer as two frames.
+                self._emit_agent(room, name)
                 continue
             if kind == "record":
-                if ev["id"] in room.records:
+                # The id is already held, or this is an older version of a held
+                # rid: dup either way, and neither rides in the batch row (§6.4).
+                if ev["id"] in room.records or not self._hold_record(room, ev):
                     dup += 1
                     continue
-                self._hold_record(room, ev)
             elif kind == "answer":
-                ask = room.asks[ev["body"]["ask"]]
-                if ask["state"] == "open":
-                    ask["state"] = "answered"
-                    ask["answer"] = {"text": ev["body"].get("text"), "ts": ev["ts"]}
-                    answered.append(ask)
+                message = room.messages[ev["body"]["ask"]]
+                message["state"] = "answered"
+                message["answer"] = {"text": ev["body"].get("text"), "ts": ev["ts"]}
+                answered.append(message)
             stored.append(ev)
             accepted += 1
         self._trim_records(room)
@@ -775,11 +875,9 @@ class Relay:
             rseq = row.rseq
             room.last_batch_at = now
             self._enforce_bytes(room, name)
-            for ask in sorted(answered, key=lambda a: a["seq"]):
-                public = self._ask_public(ask)
-                self._append(room, "ask", {"ask": public}, nbytes=len(_json_bytes(public)))
-        for _ in range(snapshots):
-            self._broadcast(room, {"t": "agent", "agent": self._agent_object(room, name)})
+            for message in sorted(answered, key=lambda m: m["seq"]):
+                self._message_row(room, message,
+                                  nbytes=len(_json_bytes(self._message_public(message))))
         return {"rseq": rseq, "accepted": accepted, "dup": dup, "rejected": rejected}
 
     # -- routes ----------------------------------------------------------
@@ -802,6 +900,9 @@ class Relay:
             return
         if name == "stream":
             self._stream(h, params["room"], q, auth)
+            return
+        if name == "agent_stream":
+            self._agent_stream(h, params["room"], auth)
             return
         route = getattr(self, "_route_" + name)
         with self._lock:
@@ -837,6 +938,24 @@ class Relay:
             raise _Reply(400, "schema", "the body must be a JSON object")
         return body
 
+    @staticmethod
+    def _after(q: dict[str, str]) -> int:
+        if "after" not in q:
+            return 0
+        parsed = _nonneg(q["after"])
+        if parsed is None:
+            raise _Reply(400, "schema", "after must be a non-negative integer")
+        return parsed
+
+    @staticmethod
+    def _limit(q: dict[str, str]) -> int:
+        if "limit" not in q:
+            return 50
+        parsed = _nonneg(q["limit"])
+        if parsed is None or not 1 <= parsed <= 200:
+            raise _Reply(400, "schema", "limit must be an integer from 1 to 200")
+        return parsed
+
     def _route_create_room(self, h: "_Handler", params: dict[str, str], q: dict[str, str],
                            auth: str | None) -> tuple[int, Any, dict[str, str]]:
         body = self._body_json(h)
@@ -848,7 +967,9 @@ class Relay:
         name = _clean(name) or "room"
         if _over(name, 60):
             raise _Reply(400, "schema", "name is at most 60 code points and 240 bytes")
-        policy = _validate_policy(body.get("policy") or {}, DEFAULT_POLICY)
+        # Only an absent key means "the defaults": `null`, `0`, `""` and `false`
+        # are wrong types, and the Worker answers them 400 (§3.1).
+        policy = _validate_policy(body.get("policy", {}), DEFAULT_POLICY)
         code = _symbols(10)
         code = f"{code[:4]}-{code[4:8]}-{code[8:]}"
         while code in self.rooms:
@@ -888,12 +1009,7 @@ class Relay:
         position = _nonneg(after if after is not None else before)
         if position is None:
             raise _Reply(400, "schema", "after and before must be non-negative integers")
-        limit = 50
-        if "limit" in q:
-            parsed = _nonneg(q["limit"])
-            if parsed is None or not 1 <= parsed <= 200:
-                raise _Reply(400, "schema", "limit must be an integer from 1 to 200")
-            limit = parsed
+        limit = self._limit(q)
         agent = q.get("agent")
         if agent is not None:
             if agent not in room.agents or room.agents[agent]["kicked"]:
@@ -938,23 +1054,26 @@ class Relay:
                          "with DELETE /r/{room}/agents/{name} or open another room")
         now = self.clock()
         token = "at-" + _symbols(32)
+        # The owner token rotates with the agent token (§10.2); the wake settings
+        # are the owner's switches and survive a re-registration like the role.
+        owner = "ot-" + _symbols(32)
         agent = existing or {"registered_at": _iso_ms(now), "snapshot": None}
         agent.update(fields)
-        agent.update({"stream": stream, "token_hash": _sha(token), "last_seen": _iso_ms(now),
-                      "kicked": False})
+        agent.update({"stream": stream, "token_hash": _sha(token), "owner_hash": _sha(owner),
+                      "last_seen": _iso_ms(now), "kicked": False})
         room.agents[name] = agent
-        self._broadcast(room, {"t": "agent", "agent": self._agent_object(room, name)})
+        self._emit_agent(room, name)
         effective = STREAMS[min(STREAMS.index(stream), STREAMS.index(room.policy["max_stream"]))]
-        return 200, {"token": token, "rseq": room.rseq, "policy": dict(room.policy),
-                     "effective_stream": effective}, {}
+        return 200, {"token": token, "owner_token": owner, "rseq": room.rseq,
+                     "policy": dict(room.policy), "effective_stream": effective}, {}
 
     def _route_kick(self, h, params, q, auth):
         room = self._room(params["room"])
-        cls, own = self._authenticate(room, auth, ("join", "token"),
-                                      "the join code or the agent's own token")
+        cls, own = self._authenticate(room, auth, ("join", "token", "owner"),
+                                      "the join code, or the agent's own agent or owner token")
         name = params["name"]
-        if cls == "token" and own != name:
-            raise _Reply(403, "forbidden", "an agent token may only remove its own name")
+        if cls != "join" and own != name:
+            raise _Reply(403, "forbidden", "an agent or owner token may only remove its own name")
         if h.body_error:
             raise h.body_error
         agent = room.agents.get(name)
@@ -964,7 +1083,12 @@ class Relay:
             return 204, None, {}
         agent["kicked"] = True
         agent["token_hash"] = None
-        self._broadcast(room, {"t": "agent", "agent": self._agent_object(room, name)})
+        agent["owner_hash"] = None
+        self._emit_agent(room, name)
+        # Its token is dead, so its listener's stream ends too; a reconnect gets 401.
+        for stream in room.agent_streams.get(name, ()):
+            stream.closed = True
+            stream.cond.notify()
         return 204, None, {}
 
     def _route_post_events(self, h, params, q, auth):
@@ -978,66 +1102,198 @@ class Relay:
     def _route_inbox(self, h, params, q, auth):
         room = self._room(params["room"])
         _, name = self._authenticate(room, auth, ("token",), "an agent token")
-        after = 0
-        if "after" in q:
-            parsed = _nonneg(q["after"])
-            if parsed is None:
-                raise _Reply(400, "schema", "after must be a non-negative integer")
-            after = parsed
+        after = self._after(q)
         room.agents[name]["last_seen"] = _iso_ms(self.clock())
-        asks = sorted((ask for ask in room.asks.values()
-                       if ask["state"] == "open" and ask["to"] == name and ask["seq"] > after),
-                      key=lambda ask: ask["seq"])
+        messages = sorted((m for m in room.messages.values()
+                           if m["seq"] > after and m["to"] in (name, "*")),
+                          key=lambda m: m["seq"])
         return 200, {"rseq": room.rseq, "role": room.roles.get(name),
-                     "asks": [{key: ask[key] for key in ("id", "seq", "viewer", "text", "ts")}
-                              for ask in asks]}, {}
+                     "messages": [self._message_public(m) for m in messages]}, {}
 
-    def _route_ask(self, h, params, q, auth):
+    def _route_messages_get(self, h, params, q, auth):
         room = self._room(params["room"])
         self._authenticate(room, auth, ("room",), "the room code")
+        after = self._after(q)
+        limit = self._limit(q)
+        matching = sorted((m for m in room.messages.values() if m["seq"] > after),
+                          key=lambda m: m["seq"])
+        return 200, {"rseq": room.rseq,
+                     "messages": [self._message_public(m) for m in matching[:limit]],
+                     "more": len(matching) > limit}, {}
+
+    def _wake_decision(self, room: _Room, to: str, requested: bool,
+                       sender: dict[str, str]) -> dict[str, Any]:
+        """The wake object at creation (§10.1, §10.4); every later change is an ack."""
+        if not requested:
+            return {"requested": False, "state": "none", "reason": None, "ts": None}
+        settings = self._wake_object(room, to)
+        if not settings["enabled"]:
+            state, reason = "off", None
+        elif settings["from"] == "agents" and sender["kind"] != "agent":
+            # `from: agents` means only a token-authenticated sender may wake this
+            # agent (§10.3); a viewer's request is answered here rather than
+            # pushed to a machine that would only decline it.
+            state, reason = "declined", "sender not allowed"
+        elif settings["listener"] != "connected":
+            state, reason = "nobody", None
+        elif settings["used_this_hour"] >= settings["max_per_hour"]:
+            state, reason = "busy", "hourly cap"
+        else:
+            state, reason = "pending", None
+        return {"requested": True, "state": state, "reason": reason, "ts": None}
+
+    def _route_post_message(self, h, params, q, auth):
+        room = self._room(params["room"])
+        cls, own = self._authenticate(room, auth, ("room", "token"),
+                                      "the room code (with a viewer name) or an agent token")
         body = self._body_json(h)
-        to, text, viewer = body.get("to"), body.get("text"), body.get("viewer")
-        if not isinstance(to, str):
-            raise _Reply(400, "schema", "to must name an agent in the room")
+        to, text = body.get("to"), body.get("text")
+        if not isinstance(to, str) or not to:
+            raise _Reply(400, "schema", "to must name an agent in the room, or be * for everyone")
         if not isinstance(text, str):
             raise _Reply(400, "schema", "text must be a string")
-        if not isinstance(viewer, str):
-            raise _Reply(400, "schema", "viewer must be a non-empty string")
-        text, viewer = _clean(text), _clean(viewer)
-        if not viewer or _over(viewer, 40):
-            raise _Reply(400, "schema", "viewer must be 1 to 40 code points and at most 160 bytes")
-        if _over(text, 500):
-            raise _Reply(400, "schema", "text is at most 500 code points and 2,000 bytes")
-        agent = room.agents.get(to)
-        if agent is None or agent["kicked"]:
-            raise _Reply(404, "agent", "no such agent in this room, or it was kicked; "
-                         "GET /r/{room} lists them")
+        text = _clean(text)
+        if not text or _over(text, 2_000):
+            raise _Reply(400, "schema", "text is 1 to 2,000 code points and at most 8,000 bytes")
+        kind = body.get("kind")
+        if kind is None:
+            kind = "say" if to == "*" else "ask"
+        if kind not in MESSAGE_KINDS:
+            raise _Reply(400, "schema", "kind must be ask, ping or say")
+        wake = body.get("wake", False)
+        if not isinstance(wake, bool):
+            raise _Reply(400, "schema", "wake must be true or false")
+        if cls == "token":
+            sender = {"kind": "agent", "name": own}
+        else:
+            viewer = body.get("viewer")
+            if not isinstance(viewer, str):
+                raise _Reply(400, "schema", "viewer must be a non-empty string")
+            viewer = _clean(viewer)
+            if not viewer or _over(viewer, 40):
+                raise _Reply(400, "schema", "viewer must be 1 to 40 code points and at most "
+                             "160 bytes")
+            sender = {"kind": "viewer", "name": viewer}
+        if to != "*":
+            target = room.agents.get(to)
+            if target is None or target["kicked"]:
+                raise _Reply(404, "agent", "no such agent in this room, or it was kicked; "
+                             "GET /r/{room} lists them")
         now = self.clock()
-        last = room.ask_at.get(viewer)
-        if last is not None and now - last < ASK_GAP_S:
-            wait = max(1, _ceil(ASK_GAP_S - (now - last)))
-            raise _Reply(429, "rate", f"one ask per viewer name every {ASK_GAP_S} s; wait "
-                         f"{wait} s", {"Retry-After": str(wait)})
-        if sum(1 for ask in room.asks.values() if ask["state"] == "open") >= MAX_OPEN_ASKS:
+        if cls == "token":
+            stamps = room.agent_message_at.setdefault(own, [])
+            stamps[:] = [t for t in stamps if now - t < 60]
+            if len(stamps) >= AGENT_MESSAGES_PER_MIN:
+                wait = max(1, _ceil(60 - (now - stamps[0])))
+                raise _Reply(429, "rate", f"an agent posts at most {AGENT_MESSAGES_PER_MIN} "
+                             f"messages a minute; wait {wait} s", {"Retry-After": str(wait)})
+        else:
+            last = room.viewer_at.get(sender["name"])
+            if last is not None and now - last < VIEWER_MESSAGE_GAP_S:
+                wait = max(1, _ceil(VIEWER_MESSAGE_GAP_S - (now - last)))
+                raise _Reply(429, "rate", f"one message per viewer name every "
+                             f"{VIEWER_MESSAGE_GAP_S} s; wait {wait} s", {"Retry-After": str(wait)})
+        if kind == "ask" and sum(1 for m in room.messages.values()
+                                 if m["kind"] == "ask" and m["state"] == "open") >= MAX_OPEN_ASKS:
             raise _Reply(503, "full", f"{MAX_OPEN_ASKS} asks are already open in this room; "
-                         "wait for answers or expiry")
-        room.ask_at[viewer] = now
+                         "wait for answers or expiry, or send a ping or a say")
+        # Nothing above had a side effect; everything below is the message.
+        if cls == "token":
+            stamps.append(now)
+        else:
+            room.viewer_at[sender["name"]] = now
         seq = room.rseq + 1
-        ask = {"id": f"ca-{room.room4}-{seq}", "seq": seq, "to": to, "viewer": viewer,
-               "text": text, "ts": _iso_ms(now), "state": "open", "answer": None,
-               "expires_at": now + room.policy["ask_ttl_s"]}
-        room.asks[ask["id"]] = ask
-        public = self._ask_public(ask)
-        self._append(room, "ask", {"ask": public}, nbytes=len(h.body))
-        return 201, {"id": ask["id"], "seq": seq}, {}
+        message = {"id": f"cm-{room.room4}-{seq}", "seq": seq, "kind": kind, "to": to,
+                   "from": sender, "text": text, "ts": _iso_ms(now),
+                   "state": "open" if kind == "ask" else "sent", "answer": None,
+                   # `wake` is ignored for the whole room (§10.1): stored false.
+                   "wake": self._wake_decision(room, to, wake and to != "*", sender),
+                   "created_at": now,
+                   "expires_at": now + room.policy["ask_ttl_s"] if kind == "ask" else None}
+        room.messages[message["id"]] = message
+        row = self._message_row(room, message, nbytes=len(h.body))
+        if message["wake"]["state"] == "pending":
+            # Exactly once, right after the message frame, to the recipient only.
+            self._push_agent(room, to, {"t": "wake", "rseq": row.rseq,
+                                        "message": self._message_public(message),
+                                        "settings": self._wake_object(room, to)})
+        return 201, {"id": message["id"], "seq": seq}, {}
+
+    def _route_wake_ack(self, h, params, q, auth):
+        room = self._room(params["room"])
+        _, name = self._authenticate(room, auth, ("token",), "an agent token")
+        body = self._body_json(h)
+        mid, result, reason = body.get("message"), body.get("result"), body.get("reason")
+        if not isinstance(mid, str):
+            raise _Reply(400, "schema", "message must be the id of the message that woke you")
+        if result not in WAKE_RESULTS:
+            raise _Reply(400, "schema", "result must be woke, busy, declined or off")
+        if reason is not None and not isinstance(reason, str):
+            raise _Reply(400, "schema", "reason must be a string of at most 200 code points, or null")
+        if isinstance(reason, str):
+            reason = _clean(reason)
+            if _over(reason, 200):
+                raise _Reply(400, "schema", "reason is at most 200 code points and 800 bytes")
+        message = room.messages.get(mid)
+        # pending -> any result; busy -> any result (a second ack may upgrade to
+        # woke); everything else is final (§10.4).
+        if (message is None or message["to"] != name
+                or message["wake"]["state"] not in ("pending", "busy")):
+            raise _Reply(400, "schema", "that message is not addressed to you or is not awaiting "
+                         "a wake-ack (its wake.state must be pending or busy)")
+        now = self.clock()
+        message["wake"].update({"state": result, "reason": reason, "ts": _iso_ms(now)})
+        if result == "woke":
+            self._count_wake(room.agents[name])
+        self._message_row(room, message, nbytes=len(h.body))
+        if result == "woke":
+            # used_this_hour changed, and that lives on the agent object.
+            self._emit_agent(room, name)
+        return 200, {"message": self._message_public(message)}, {}
+
+    def _route_wake_settings(self, h, params, q, auth):
+        room = self._room(params["room"])
+        cls, own = self._authenticate(room, auth, ("token", "owner"),
+                                      "this agent's owner token or agent token")
+        name = params["name"]
+        if own != name:
+            raise _Reply(403, "forbidden", "an owner or agent token flips only its own agent's "
+                         "wake switches")
+        body = self._body_json(h)
+        if not any(key in body for key in WAKE_KEYS):
+            raise _Reply(400, "schema", "send at least one of " + ", ".join(WAKE_KEYS))
+        settings = dict(room.agents[name].get("wake") or {})
+        if "enabled" in body:
+            if not isinstance(body["enabled"], bool):
+                raise _Reply(400, "schema", "enabled must be true or false")
+            settings["enabled"] = body["enabled"]
+        if "from" in body:
+            if body["from"] not in WAKE_FROM:
+                raise _Reply(400, "schema", "from must be agents or room (there is no anyone; "
+                             "the room code is the outer wall)")
+            settings["from"] = body["from"]
+        if "max_per_hour" in body:
+            value = body["max_per_hour"]
+            if not _is_int(value) or not 1 <= value <= 60:
+                raise _Reply(400, "schema", "max_per_hour must be an integer from 1 to 60")
+            settings["max_per_hour"] = int(value)
+        settings["set_by"] = "owner" if cls == "owner" else "agent"
+        settings["ts"] = _iso_ms(self.clock())
+        room.agents[name]["wake"] = settings
+        wake = self._wake_object(room, name)
+        self._emit_agent(room, name)
+        # The listener applies the last wake frame it received to its own config
+        # (§10.3); a settings change carries no message.
+        self._push_agent(room, name, {"t": "wake", "message": None, "settings": wake})
+        return 200, {"wake": wake}, {}
 
     def _route_role(self, h, params, q, auth):
         room = self._room(params["room"])
-        cls, own = self._authenticate(room, auth, ("room", "token"),
-                                      "the room code or the agent's own token")
+        cls, own = self._authenticate(room, auth, ("room", "token", "owner"),
+                                      "the room code, or the agent's own agent or owner token")
         name = params["name"]
-        if cls == "token" and own != name:
-            raise _Reply(403, "forbidden", "an agent token may only set its own role")
+        if cls != "room" and own != name:
+            raise _Reply(403, "forbidden", "an agent or owner token may only set its own role")
         body = self._body_json(h)
         role = body.get("role")
         if role is not None and not isinstance(role, str):
@@ -1045,7 +1301,7 @@ class Relay:
         role = _clean(role) if isinstance(role, str) else ""
         if _over(role, 60):
             raise _Reply(400, "schema", "role is at most 60 code points and 240 bytes")
-        if cls == "token":
+        if cls != "room":
             viewer = "owner"
         else:
             viewer = body.get("viewer")
@@ -1075,7 +1331,8 @@ class Relay:
                     if role else None)
         room.roles[name] = new_role
         room.role_seq[name] = seq
-        self._append(room, "role", {"agent": name, "role": new_role}, nbytes=len(h.body))
+        self._append(room, "role", {"agent": name, "role": new_role}, nbytes=len(h.body),
+                     agents=name)
         return 200, {"set_seq": seq}, {}
 
     def _route_policy(self, h, params, q, auth):
@@ -1085,7 +1342,8 @@ class Relay:
         if not any(key in body for key in POLICY_KEYS):
             raise _Reply(400, "schema", "send at least one of " + ", ".join(POLICY_KEYS))
         room.policy = _validate_policy(body, room.policy)
-        self._append(room, "policy", {"policy": dict(room.policy)}, nbytes=len(h.body))
+        self._append(room, "policy", {"policy": dict(room.policy)}, nbytes=len(h.body),
+                     agents="*")
         return 200, {"policy": dict(room.policy)}, {}
 
     def _route_delete_room(self, h, params, q, auth):
@@ -1102,6 +1360,55 @@ class Relay:
         return 204, None, {}
 
     # -- SSE -------------------------------------------------------------
+
+    @staticmethod
+    def _sse_headers(h: "_Handler") -> None:
+        h.send_response(200)
+        h.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        h.send_header("Cache-Control", "no-cache")
+        h.send_header("X-Accel-Buffering", "no")
+        h.end_headers()
+
+    def _watch_eof(self, conn: socket.socket, stream: _Viewer) -> None:
+        """Mark the stream closed the moment the peer hangs up.
+
+        The writer only learns of a dead socket when it writes, which on an idle
+        stream is the next keepalive up to 15 s away, and often the write after
+        that; `listener` (§10.3) and the viewer cap both need the slot back now.
+        Reads go to the raw socket because the buffered rfile refuses every read
+        after one timeout, and the handler's 30 s socket timeout would trip it.
+        """
+        while True:
+            try:
+                data = conn.recv(1)
+            except socket.timeout:
+                continue
+            except (OSError, ValueError):
+                data = b""
+            if not data:
+                break
+        with self._lock:
+            if not stream.closed:
+                stream.closed = True
+                stream.cond.notify()
+
+    def _pump(self, h: "_Handler", stream: _Viewer) -> None:
+        """Write the queue as SSE frames until either side closes the connection."""
+        threading.Thread(target=self._watch_eof, args=(h.connection, stream),
+                         name="canvas-relay-eof", daemon=True).start()
+        while True:
+            with self._lock:
+                if not stream.queue and not stream.closed:
+                    stream.cond.wait(KEEPALIVE_S)
+                frames = list(stream.queue)
+                stream.queue.clear()
+                closed = stream.closed
+            if frames:
+                h.wfile.write(b"".join(_sse(frame) for frame in frames))
+            elif not closed:
+                h.wfile.write(b": keepalive\n\n")
+            if closed:
+                return
 
     def _stream(self, h: "_Handler", code: str, q: dict[str, str], auth: str | None) -> None:
         viewer: _Viewer | None = None
@@ -1129,32 +1436,50 @@ class Relay:
                 # both in the tail and in the live queue.
                 room.viewers.append(viewer)
                 viewer.queue.extend(self._backfill(room, after))
-        h.send_response(200)
-        h.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        h.send_header("Cache-Control", "no-cache")
-        h.send_header("X-Accel-Buffering", "no")
-        h.end_headers()
+        self._sse_headers(h)
         if viewer is None:
             h.wfile.write(_sse({"t": "full"}))
             return
         try:
-            while True:
-                with self._lock:
-                    if not viewer.queue and not viewer.closed:
-                        viewer.cond.wait(KEEPALIVE_S)
-                    frames = list(viewer.queue)
-                    viewer.queue.clear()
-                    closed = viewer.closed
-                if frames:
-                    h.wfile.write(b"".join(_sse(frame) for frame in frames))
-                elif not closed:
-                    h.wfile.write(b": keepalive\n\n")
-                if closed:
-                    return
+            self._pump(h, viewer)
         finally:
             with self._lock:
                 with contextlib.suppress(ValueError):
                     room.viewers.remove(viewer)
+
+    def _agent_stream(self, h: "_Handler", code: str, auth: str | None) -> None:
+        """§10.5: the listener's stream -- hello, then only what concerns this agent."""
+        stream: _Viewer | None = None
+        with self._lock:
+            room = self._room(code)
+            # Header only: there is no query form for this stream, so a ?ticket=
+            # beside no header is simply no credential.
+            _, name = self._authenticate(room, auth, ("token",), "an agent token")
+            assert name is not None
+            streams = room.agent_streams.setdefault(name, [])
+            if sum(1 for s in streams if not s.closed) < MAX_AGENT_STREAMS:
+                stream = _Viewer(threading.Condition(self._lock))
+                streams.append(stream)
+                stream.queue.append({"t": "hello", "transport": "sse",
+                                     "agent": self._agent_object(room, name),
+                                     "policy": dict(room.policy)})
+                if sum(1 for s in streams if not s.closed) == 1:
+                    # The first open socket flips `listener` (§10.3); this stream
+                    # sees the frame too, after its hello.
+                    self._emit_agent(room, name)
+        self._sse_headers(h)
+        if stream is None:
+            h.wfile.write(_sse({"t": "full"}))
+            return
+        try:
+            self._pump(h, stream)
+        finally:
+            with self._lock:
+                with contextlib.suppress(ValueError):
+                    room.agent_streams.get(name, []).remove(stream)
+                if (self.rooms.get(code) is room and name in room.agents
+                        and not any(not s.closed for s in room.agent_streams.get(name, ()))):
+                    self._emit_agent(room, name)       # the last socket closed: absent
 
 
 # ---------------------------------------------------------------- HTTP
@@ -1166,12 +1491,16 @@ _ROUTES: list[tuple[str, re.Pattern[str], str]] = [
     ("DELETE", re.compile(r"^/r/(?P<room>[^/]+)$"), "delete_room"),
     ("POST", re.compile(r"^/r/(?P<room>[^/]+)/ticket$"), "ticket"),
     ("GET", re.compile(r"^/r/(?P<room>[^/]+)/stream$"), "stream"),
+    ("GET", re.compile(r"^/r/(?P<room>[^/]+)/agent-stream$"), "agent_stream"),
     ("GET", re.compile(r"^/r/(?P<room>[^/]+)/events$"), "events_get"),
     ("POST", re.compile(r"^/r/(?P<room>[^/]+)/events$"), "post_events"),
     ("POST", re.compile(r"^/r/(?P<room>[^/]+)/agents/(?P<name>[^/]+)$"), "register"),
     ("DELETE", re.compile(r"^/r/(?P<room>[^/]+)/agents/(?P<name>[^/]+)$"), "kick"),
+    ("PUT", re.compile(r"^/r/(?P<room>[^/]+)/agents/(?P<name>[^/]+)/wake$"), "wake_settings"),
     ("GET", re.compile(r"^/r/(?P<room>[^/]+)/inbox$"), "inbox"),
-    ("POST", re.compile(r"^/r/(?P<room>[^/]+)/asks$"), "ask"),
+    ("POST", re.compile(r"^/r/(?P<room>[^/]+)/messages$"), "post_message"),
+    ("GET", re.compile(r"^/r/(?P<room>[^/]+)/messages$"), "messages_get"),
+    ("POST", re.compile(r"^/r/(?P<room>[^/]+)/wake-ack$"), "wake_ack"),
     ("PUT", re.compile(r"^/r/(?P<room>[^/]+)/roles/(?P<name>[^/]+)$"), "role"),
     ("PUT", re.compile(r"^/r/(?P<room>[^/]+)/policy$"), "policy"),
     ("POST", re.compile(r"^/r/(?P<room>[^/]+)/prune$"), "prune"),

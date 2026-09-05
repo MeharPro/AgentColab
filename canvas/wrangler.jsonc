@@ -10,10 +10,12 @@
     "directory": "./web",
     "binding": "ASSETS",
     // The room code rides in the URL fragment, so every non-API path is the
-    // one page; the Worker sees only the contract's routes (and the internal
-    // creation path, which it refuses, A16).
+    // one page. Prefix globs, not exact ones: /roomsx and /healthz/x must reach
+    // the Worker to be answered "no such route" (contract §3.16) instead of
+    // being served the page by the assets layer; the Worker then forwards
+    // only the contract's routes (and refuses the internal creation path, A16).
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/r/*", "/rooms", "/healthz", "/__create", "/__create/*"]
+    "run_worker_first": ["/r/*", "/rooms*", "/healthz*", "/__create*"]
   },
   "durable_objects": {
     "bindings": [{ "name": "ROOM", "class_name": "Room" }]

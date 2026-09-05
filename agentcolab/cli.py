@@ -288,26 +288,77 @@ def _join_canvas(store: Store) -> None:
                 print("          stream your own session with "
                       "`colab canvas join <join code>`")
             return
+        requested = str(cfg.get("stream") or "tools")
         reg = canvas.register(relay, str(cfg["join_code"]), store.agent,
                               harness=str(store.config().get("harness") or "") or None,
                               human=str(store.config().get("github") or "") or None,
                               model=str(store.config().get("model") or "") or None,
-                              stream=str(cfg.get("stream") or "tools"))
+                              stream=requested)
         if not reg:
             return
-        config = store.config()
-        block = dict(config.get("canvas") or {})
         room = str(cfg["join_code"]).split(".", 1)[0]
-        block.update({"relay": relay, "room": room, "token": reg.get("token"),
-                      "name": store.agent,
-                      "stream": reg.get("effective_stream") or "tools"})
-        config["canvas"] = block
-        store.save_config(config)
+        block = _save_canvas_join(store, relay=relay, room=room, join_code=None, reg=reg,
+                                  requested=requested)
         started = canvas.ensure_tailers_for_cwd(store)
         print()
         print(f"canvas    {canvas.viewer_url(relay, room)}")
         print(f"          streaming {block['stream']} from "
               f"{len(started)} session(s) in this checkout")
+        _print_owner_link(relay, room, block)
+        _start_listener_if_enabled(store)
+
+
+def _save_canvas_join(store: Store, *, relay: str, room: str, join_code: str | None,
+                      reg: dict[str, Any], requested: str) -> dict[str, Any]:
+    """Write what a registration returned into config.json and return the block.
+
+    The stream level is decided here, as the minimum of what this machine asked
+    for and what the relay answered -- never copied from the relay, which could
+    otherwise open `full` on a machine that asked for `summary`. The file ends
+    up mode 600 (`Store.save_config`); it now holds the room's admin credential
+    and this agent's write credential, and the chmod is repeated here so the
+    promise does not depend on a helper somebody may loosen later.
+    """
+    from . import canvas
+    config = store.config()
+    block = dict(config.get("canvas") or {}) if isinstance(config.get("canvas"), dict) else {}
+    block.update({"relay": relay, "room": room, "token": reg.get("token"), "name": store.agent,
+                  "stream": canvas.clamp_stream(requested, reg.get("effective_stream"))})
+    if join_code:
+        block["join_code"] = join_code
+    if reg.get("owner_token"):
+        block["owner_token"] = reg["owner_token"]
+    policy = reg.get("policy") if isinstance(reg.get("policy"), dict) else {}
+    if policy.get("max_stream") in canvas.LEVELS:
+        # A ceiling can only lower the level (`effective_level` takes the min),
+        # so the relay's word is safe to keep for that purpose alone.
+        block["policy"] = {"max_stream": policy["max_stream"]}
+    config["canvas"] = block
+    store.save_config(config)
+    with contextlib.suppress(OSError):
+        os.chmod(store.config_path, 0o600)
+    canvas.clear_room_gone(store)
+    return block
+
+
+def _print_owner_link(relay: str, room: str, block: dict[str, Any]) -> None:
+    """The owner link is printed once at join (§10.2) and again only on request."""
+    from . import canvas
+    token = block.get("owner_token")
+    if not token:
+        return
+    print(f"  owner    {canvas.owner_link(relay, room, str(token))}")
+    print("           flips this machine's wake switch from a browser; printed once here,")
+    print("           again with `colab canvas status --owner-link`. Keep it to yourself.")
+
+
+def _start_listener_if_enabled(store: Store) -> None:
+    with contextlib.suppress(Exception):
+        from . import wake
+        if wake.settings(store).get("enabled"):
+            state = wake.ensure_listener(store)
+            if state in ("spawned", "running"):
+                print(f"  wake     on — listener {state}")
 
 
 def _free_name(name: str, taken: set[str]) -> str:
@@ -389,6 +440,9 @@ def _canvas_keepalive(store: Store) -> None:
         from . import canvas
         if canvas.is_on(store):
             canvas.ensure_tailers_for_cwd(store)
+            # Answers spooled while no session was running have no daemon to
+            # drain them; every sync and status is one.
+            canvas.flush_spools(store, timeout=3)
 
 
 # ================================================================ status
@@ -1527,6 +1581,24 @@ def cmd_doctor(store: Store, args: argparse.Namespace) -> int:
         ok, detail = adapter.verify()
         check(f"{adapter.name}", ok, detail, fatal=False)
 
+    print("canvas")
+    with contextlib.suppress(Exception):
+        from . import canvas, wake
+        if canvas.is_on(store):
+            cfg = canvas.canvas_config(store)
+            check("room joined", True, canvas.viewer_url(str(cfg.get("relay")), str(cfg.get("room"))))
+            state = wake.status(store)
+            if state.get("enabled"):
+                check("wake", state.get("listener") == "connected",
+                      f"on · from {state.get('from')} · {state.get('used_this_hour')}/{state.get('max_per_hour')} "
+                      f"this hour · listener {state.get('listener')}"
+                      + ("" if state.get("listener") == "connected" else " — `colab wake on` starts one"),
+                      fatal=False)
+            else:
+                check("wake", True, "off — `colab wake on` lets a ping start a session here", fatal=False)
+        else:
+            check("room joined", False, "off — `colab canvas join <join code>` to stream", fatal=False)
+
     print("harness")
     check("harness detected", _detect_harness() != "unknown", _detect_harness(), fatal=False)
     settings = store.repo_root / ".claude" / "settings.json"
@@ -2236,34 +2308,31 @@ def cmd_canvas(store: Store | None, args: argparse.Namespace) -> int:
             eprint("     Ask whoever ran `colab canvas new` for it.")
             return 1
         name = store.agent
+        requested = args.stream or "tools"
         reg = canvas.register(relay, join_code, name,
                               harness=str(store.config().get("harness") or "") or None,
                               human=str(store.config().get("github") or "") or None,
                               model=str(store.config().get("model") or "") or None,
-                              stream=args.stream or "tools")
+                              stream=requested)
         if not reg:
             eprint(f"colab: the relay at {relay} refused the join code.")
             eprint("     It may be wrong, or the room may have been deleted.")
             return 1
         room = join_code.split(".", 1)[0]
-        config = store.config()
-        block = dict(config.get("canvas") or {})
-        block.update({"relay": relay, "room": room, "join_code": join_code,
-                      "token": reg.get("token"), "name": name,
-                      "stream": reg.get("effective_stream") or args.stream or "tools"})
-        config["canvas"] = block
-        store.save_config(config)
-        canvas.clear_room_gone(store)
+        block = _save_canvas_join(store, relay=relay, room=room, join_code=join_code, reg=reg,
+                                  requested=requested)
         started = canvas.ensure_tailers_for_cwd(store)
         print(f"joined the canvas room as {name}")
         print(f"  watch    {canvas.viewer_url(relay, room)}")
         print(f"  streams  {block['stream']}"
-              + ("" if block["stream"] == (args.stream or "tools")
-                 else f" (the room's ceiling; you asked for {args.stream})"))
+              + ("" if block["stream"] == requested
+                 else f" (the room's ceiling; you asked for {requested})"))
         if started:
             print(f"  live     {len(started)} session(s) from this checkout")
         else:
             print("  live     no session found yet — the next one streams automatically")
+        _print_owner_link(relay, room, block)
+        _start_listener_if_enabled(store)
         return 0
 
     if not canvas.is_on(store):
@@ -2315,22 +2384,63 @@ def cmd_canvas(store: Store | None, args: argparse.Namespace) -> int:
         config.pop("canvas", None)
         store.save_config(config)
         print("canvas off on this machine.")
-        print(f"  daemons   {stopped} stopped")
+        print(f"  daemons   {stopped} stopped (the wake listener among them)")
         print("  room      still there for everyone else; rejoin with `colab canvas join`")
         return 0
+
+    if action == "say":
+        text = " ".join(getattr(args, "words", None) or []).strip()
+        if not text:
+            eprint("colab: say what — `colab canvas say \"<text>\"`")
+            return 1
+        try:
+            posted = canvas.post_message(relay, str(cfg.get("room")), str(cfg.get("token")),
+                                         to="*", kind="say", text=records.scrub(text)[:2000])
+        except Exception as exc:
+            eprint(f"colab: the relay did not take that line: {exc}")
+            eprint("     An older relay has no messages; `colab canvas status` shows its version.")
+            return 1
+        return _ok(f"said to the room ({posted.get('id')})")
 
     if action == "export":
         block = {"relay": relay, "room": str(cfg.get("room"))}
         if args.with_join_code:
             block["join_code"] = str(cfg.get("join_code"))
-        print(json.dumps({"canvas": block}, indent=2))
         if args.with_join_code:
-            eprint("")
             eprint("colab: that join code lets anyone who can read this repository stream")
             eprint("     as any agent name. Commit it only for a private repo you trust.")
+        if args.stdout:
+            print(json.dumps({"canvas": block}, indent=2))
+            return 0
+        # The documented quickstart says `export` writes the file, so it does:
+        # merged into whatever is there, `$comment` and the chat block included.
+        # This is the one place the tool writes into the checkout, and it is a
+        # file the user then commits by hand -- nothing else is touched.
+        path = store.repo_root / ".agentcolab" / "agentcolab.json"
+        existing = read_json(path) if path.is_file() else {}
+        existing = existing if isinstance(existing, dict) else {}
+        merged = dict(existing.get("canvas") or {}) if isinstance(existing.get("canvas"), dict) else {}
+        merged.update(block)
+        existing["canvas"] = merged
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, existing)
+        rel = path.relative_to(store.repo_root)
+        print(f"wrote {rel}")
+        print(json.dumps({"canvas": merged}, indent=2))
+        if merged.get("join_code") and not args.with_join_code:
+            eprint(f"colab: {rel} already carried a join code and still does.")
+        print(f"Next:  git add {rel} && git commit -m \"AgentColab: canvas room\"")
         return 0
 
     # ---- status (the default)
+    if getattr(args, "owner_link", False):
+        token = cfg.get("owner_token")
+        if not token:
+            eprint("colab: no owner token saved — the relay that registered this agent predates")
+            eprint("     them. `colab canvas join <join code>` again to get one.")
+            return 1
+        print(canvas.owner_link(relay, str(cfg.get("room")), str(token)))
+        return 0
     health = canvas.healthz(relay)
     print(f"canvas    {cfg.get('room')}")
     print(f"  watch     {canvas.viewer_url(relay, str(cfg.get('room')))}")
@@ -2350,7 +2460,140 @@ def cmd_canvas(store: Store | None, args: argparse.Namespace) -> int:
         print(f"  role      {records.one_line(role.get('role'), 60)} "
               f"(from viewer {records.one_line(role.get('viewer'), 24)})")
     print(f"  {session.canvas_budget_line(store)}")
+    with contextlib.suppress(Exception):
+        from . import wake
+        print(f"  {_wake_line(wake.status(store))}")
+    if cfg.get("owner_token"):
+        print("  owner     link saved — `colab canvas status --owner-link` prints it")
     return 0
+
+
+def _wake_line(state: dict[str, Any]) -> str:
+    if not state.get("enabled"):
+        return "wake: off — `colab wake on` lets a ping start a session here"
+    return (f"wake: on · from {state.get('from')} · {state.get('used_this_hour')}/{state.get('max_per_hour')} "
+            f"this hour · listener {state.get('listener')}")
+
+
+# ================================================================ wake, ping
+
+
+def cmd_wake(store: Store, args: argparse.Namespace) -> int:
+    """`colab wake on|off|status|serve|test` (contract §10.7)."""
+    from . import canvas, wake
+    action = args.action or "status"
+    if action == "serve":
+        if not canvas.is_on(store):
+            eprint("colab: this machine has not joined a canvas room, so there is nothing to listen to.")
+            eprint("     Run:  colab canvas join <join code>")
+            return 1
+        return wake.serve(store, dry_run=bool(args.dry_run), once=bool(args.once))
+    if action == "test":
+        raw = " ".join(getattr(args, "words", None) or []).strip()
+        if raw == "-" or not raw:
+            raw = sys.stdin.read().strip()
+        try:
+            message = json.loads(raw)
+        except ValueError:
+            eprint('colab: pass the message as JSON — `colab wake test \'{"id":"cm-…","to":"<me>",'
+                   '"kind":"ping","text":"…","from":{"kind":"agent","name":"bob"}}\'`')
+            return 1
+        if not isinstance(message, dict):
+            eprint("colab: the message must be a JSON object")
+            return 1
+        config = wake.settings(store)
+        result, reason = wake.decide(store, message, config)
+        print(f"decision  {result}" + (f" ({reason})" if reason else ""))
+        if result == "woke":
+            argv = wake.harness_argv(str(store.config().get("harness") or "claude-code"), "<prompt>")
+            print(f"would run {' '.join(argv) if argv else '(no headless command for this harness)'}")
+        print()
+        print(wake.prompt(message, config, me=store.agent, used=wake.used_this_hour(store) + 1))
+        return 0
+    if not canvas.is_on(store):
+        eprint("colab: this machine has not joined a canvas room.")
+        eprint("     Run:  colab canvas join <join code>   then   colab wake on")
+        return 1
+    cfg = canvas.canvas_config(store)
+    relay, room, token = str(cfg.get("relay") or ""), str(cfg.get("room") or ""), str(cfg.get("token") or "")
+    name = str(cfg.get("name") or store.agent)
+    if action in ("on", "off"):
+        changes: dict[str, Any] = {"enabled": action == "on"}
+        if getattr(args, "from_", None):
+            changes["from"] = args.from_
+        if getattr(args, "max_per_hour", None):
+            changes["max_per_hour"] = int(args.max_per_hour)
+        settings = canvas.save_wake_settings(store, **changes)
+        # The relay's copy is what the page shows; the machine's is what happens.
+        remote = canvas.put_wake(relay, room, token, name, settings)
+        lines = []
+        if action == "on":
+            state = wake.ensure_listener(store)
+            lines.append(f"listener    {state}" + ("" if state != "failed" else
+                                                    " — `colab wake serve` in a terminal shows why"))
+            if args.at_login:
+                lines.extend(wake.install_login_item(store))
+        else:
+            stopped = wake.stop_listener(store)
+            lines.append(f"listener    {'stopped' if stopped else 'was not running'}")
+            if args.at_login:
+                lines.extend(wake.remove_login_item(store) or ["login item  none installed"])
+        print(f"wake {'on' if settings['enabled'] else 'off'} for {name}")
+        print(f"  from        {settings['from']}  ({'agents and viewers of the room' if settings['from'] == 'room' else 'other agents only'})")
+        print(f"  cap         {settings['max_per_hour']} session(s) an hour")
+        for line in lines:
+            print(f"  {line}")
+        print(f"  relay       {'updated' if remote is not None else 'not updated — it predates wake, or is unreachable; the page will not show it'}")
+        if action == "on":
+            print()
+            print("A woken session runs `claude -p` / `codex exec` with your harness's own permission")
+            print("settings, so it can only use tools you already allow headless. The message is")
+            print("fenced as untrusted; the agent is told to do only what you would allow anyway.")
+        return 0
+    # status
+    state = wake.status(store)
+    print(f"wake      {'on' if state['enabled'] else 'off'}  (as {name})")
+    print(f"  from        {state['from']}")
+    print(f"  cap         {state['max_per_hour']} an hour · {state['used_this_hour']} used this hour")
+    print(f"  listener    {state['listener']}" + (f" (pid {state['pid']})" if state.get("pid") else ""))
+    item = wake.login_item_path(store)
+    print(f"  login item  {'installed' if state.get('login_item') else 'none'}"
+          + (f" ({item})" if item and state.get("login_item") else ""))
+    logs = sorted((canvas.markers_dir(store) / wake.LOG_DIR).glob("*.log")) if (canvas.markers_dir(store) / wake.LOG_DIR).is_dir() else []
+    if logs:
+        print(f"  sessions    {len(logs)} log(s) under {canvas.markers_dir(store) / wake.LOG_DIR}")
+    return 0
+
+
+def cmd_ping(store: Store, args: argparse.Namespace) -> int:
+    """`colab ping <agent> "<text>" [--no-wake]`: a ping on the canvas and the same line on the ref."""
+    from . import canvas
+    to = records.slug(args.agent)
+    text = records.scrub(" ".join(args.text)).strip()
+    if not text:
+        eprint("colab: say what they should look at — `colab ping <agent> \"<text>\"`")
+        return 1
+    # The git-ref copy first: it enforces the hourly send cap, and an agent
+    # outside the room still sees the ping on its next sync.
+    rc = cmd_send(store, argparse.Namespace(
+        subject=[text[:200]], body="", to=to, kind="ping", paths=[], task="", channel="link",
+        needs_reply=False, reply_to="", force=bool(getattr(args, "force", False)), allow_secrets=False))
+    if rc:
+        return rc
+    if not canvas.is_on(store):
+        print("  (no canvas room joined, so nothing was pinged on the canvas)")
+        return 0
+    cfg = canvas.canvas_config(store)
+    try:
+        posted = canvas.post_message(str(cfg.get("relay") or ""), str(cfg.get("room") or ""),
+                                     str(cfg.get("token") or ""), to=to, kind="ping",
+                                     text=text[:2000], wake=not args.no_wake)
+    except Exception as exc:
+        eprint(f"colab: the canvas relay did not take the ping: {exc}")
+        eprint("     The git-ref copy went out; an older relay has no messages.")
+        return 1
+    return _ok(f"pinged {to} on the canvas ({posted.get('id')})"
+               + ("" if args.no_wake else " — wake requested; their machine decides"))
 
 
 def cmd_hook(store: Store | None, args: argparse.Namespace) -> int:
@@ -2601,13 +2844,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("canvas", help="the live web view of every agent in a room")
     p.add_argument("action", nargs="?", default="status",
                    choices=["new", "join", "serve", "tail", "role", "status",
-                            "off", "export", "ensure", "pull"],
+                            "off", "export", "ensure", "pull", "say"],
                    help="new: mint a room · join: stream from this machine · "
-                        "serve: run your own relay · status: where things stand")
+                        "serve: run your own relay · status: where things stand · "
+                        "say: a line to everyone in the room")
     # One free-form word list rather than a positional per verb: `join` takes a
     # code, `role` takes a sentence, `ensure` is handed a JSON blob by Codex's
     # `notify` and must ignore it rather than exit 2 on every turn.
-    p.add_argument("words", nargs="*", help="the join code (join) or the role text (role)")
+    p.add_argument("words", nargs="*", help="the join code (join), the role text (role), the line (say)")
+    p.add_argument("--owner-link", dest="owner_link", action="store_true",
+                   help="print this machine's owner link again (status)")
+    p.add_argument("--stdout", action="store_true",
+                   help="print the export instead of writing .agentcolab/agentcolab.json")
     p.add_argument("--relay", help="relay base URL (default: the project's, then the built-in one)")
     p.add_argument("--name", help="what to call the room, for `new`")
     p.add_argument("--max-stream", dest="max_stream",
@@ -2626,6 +2874,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--discover", action="store_true", help="tail every live session here")
     p.add_argument("--once", action="store_true", help="one pass, then exit")
     p.set_defaults(func=cmd_canvas, needs_store=False)
+
+    p = sub.add_parser("wake", help="let a ping from the room start a session on this machine")
+    p.add_argument("action", nargs="?", default="status",
+                   choices=["on", "off", "status", "serve", "test"],
+                   help="on/off: the switch · status · serve: the listener itself · "
+                        "test: what a given message would do")
+    p.add_argument("words", nargs="*", help="the message JSON, for `test` ('-' reads stdin)")
+    p.add_argument("--from", dest="from_", choices=["agents", "room"],
+                   help="who may wake this machine: other agents only, or viewers of the room too")
+    p.add_argument("--max-per-hour", dest="max_per_hour", type=int, choices=range(1, 61),
+                   metavar="N", help="at most N woken sessions an hour (1-60)")
+    p.add_argument("--at-login", dest="at_login", action="store_true",
+                   help="also install (on) or remove (off) a login item that runs the listener")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="serve: decide and print, start nothing, ack nothing")
+    p.add_argument("--once", action="store_true", help="serve: one connection, then exit")
+    p.set_defaults(func=cmd_wake)
+
+    p = sub.add_parser("ping", help="ask one agent to look at something; may wake its machine")
+    p.add_argument("agent")
+    p.add_argument("text", nargs="+")
+    p.add_argument("--no-wake", dest="no_wake", action="store_true",
+                   help="deliver at their next sync only; never start a session")
+    p.add_argument("--force", action="store_true", help="past the hourly send cap")
+    p.set_defaults(func=cmd_ping)
 
     p = sub.add_parser("hook", help="internal: called by harness hooks")
     p.add_argument("event")

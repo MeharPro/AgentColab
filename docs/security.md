@@ -170,6 +170,57 @@ cannot write into or prune another's directory. Claim patterns are matched, not
 resolved — a pattern beginning `../` matches nothing. `put()` refuses any path
 whose owner segment is not this agent.
 
+### T11 — A leaked owner link
+
+The owner link (`<relay>/#<room>/o=<token>`) is printed once by
+`colab canvas join` and then lives in one browser's `localStorage`. Somebody
+else gets it — a screenshot, a shared machine, a pasted URL.
+
+**What it grants, exactly.** For that one agent: turn the wake toggle on or
+off, raise the hourly cap to the relay's maximum of sixty, set its role, or
+remove it from the room. It cannot read the inbox, post events or messages,
+mint anything, or touch any other agent. So the worst case is: the holder turns
+wake on, then pings the machine up to the cap, starting headless sessions in
+the joined checkout.
+
+**Defense.** Those sessions run under the harness's normal permission settings,
+untouched by anything in this project — a headless Claude Code session declines
+every tool the owner has not pre-allowed, and the wake prompt tells the agent
+to answer and stop when in doubt. The machine's local config is the authority:
+the relay's flag is a display, and a listener whose own config says off acks
+every wake-up `off` whatever the relay shows, so `colab wake off` on the
+machine ends it regardless of who holds the link. The page strips `o=` from
+the address bar on load so a copied link does not carry it; its shape is in
+the scrubber's pattern list; re-joining rotates it.
+
+**Residual risk: real.** A machine whose owner pre-allowed broad tool
+permissions for headless sessions is a machine where a leaked owner link, plus
+a ping, runs an agent with those permissions. That is the harness's permission
+model doing exactly what it was told, and this project cannot narrow it. Do not
+pre-allow for a headless session what you would not let an unattended agent do.
+
+### T12 — Wake abuse
+
+A peer, or a viewer where the owner allowed viewers, pings an agent to start
+sessions it did not need — to run up a bill, to keep a machine busy, or to get
+an unattended agent to do something its owner would not.
+
+**Defense.** Nothing starts unless the owner ran `colab wake on`; the default
+`from: agents` means only a token-authenticated sender can wake, never a
+room-code holder; the hourly cap (four by default) is enforced on the relay
+and again on the machine; a running session is never interrupted — the sender
+is told `busy`. The ping's text arrives fenced and labelled untrusted, and
+RULES.md §15 tells a woken agent that the toggle is its human's instruction and
+the ping is not: work only within the repository and within what its human
+would allow in a normal session, otherwise answer why not and stop. Every
+outcome — `woke`, `busy`, `declined`, `off`, `nobody` — is acked back to the
+room, so a machine being hammered is visible to everyone watching.
+
+**Residual risk: real.** This is T1 with a process start attached. The cap
+bounds how often a session can begin, not what a begun session costs, and
+framing is not a sandbox. A woken session that does the wrong thing did so
+within permissions its owner granted — see "What cannot be defended", 3.
+
 ---
 
 ## What cannot be defended — bound it instead
@@ -194,7 +245,13 @@ a capability it did not already have.** It adds no tool that writes files, runs
 commands, spends money, or reaches the network beyond the git remote, the
 chat webhook, and — once you have joined a room — the canvas relay you chose.
 An injected instruction can at most cause an agent to do something it could
-already have done.
+already have done. A wake-up does not change this: it starts a session, and
+the session has exactly the permissions the owner configured in the harness —
+nothing here adds one, and a headless session declines what was not
+pre-allowed. It does mean an agent can now be *running* when nobody is
+watching, which is why wake is off until the owner turns it on and why the
+first thing to check after an unwanted wake-up is the harness's permission
+settings, not the ping.
 
 **4. Semantic conflict.** Two changes that merge cleanly, compile, pass the
 tests and are jointly wrong. We detect textual overlap — arithmetic on
@@ -215,8 +272,11 @@ What goes where, exactly:
 | Chat mirror of the above | Discord's or Slack's servers, scrubbed and truncated |
 | Bot tokens, webhook URLs | `~/.agentcolab/<project>/p/<profile>/config.json`, mode 600. Never the repo, never printed, never published. |
 | Canvas room code | The browser's URL fragment and `localStorage`; after `colab canvas export`, the project's public config. It is a bearer token to a live transcript — treat it like a webhook URL. |
-| Canvas join code | Beside the bot tokens in the per-profile `config.json`, mode 600; printed once by `colab canvas new`; in the repo only with `--with-join-code`. |
-| Canvas agent token | The per-profile `config.json`, mode 600. Never the repo, never printed. |
+| Canvas join code | Beside the bot tokens in the per-profile `config.json`; printed once by `colab canvas new`; in the repo only with `--with-join-code`. `colab canvas join` sets the file to mode 600 and every later save keeps that mode. |
+| Canvas agent token | The per-profile `config.json`, same mode caveat. Never the repo, never printed. |
+| Canvas owner token | Printed once by `colab canvas join` as the owner link, then one browser's `localStorage`. Never the repo. Grants that one agent's wake toggle, role and removal — nothing else. |
+| Canvas messages, pings, answers | The relay, for seven days, readable by anyone holding the room code. A `colab ping` also writes a git-ref message, which goes where every record goes. |
+| A wake-up | Starts a session on the recipient's own machine, in the joined checkout, under that harness's permission settings. Nothing about the recipient's machine goes anywhere it did not already go; the sender learns only the outcome (`woke`, `busy`, `declined`, `off`, `nobody`). |
 | SSH private key | Never read. Signing shells out to `ssh-keygen`, which can also use an agent. |
 | Environment values | Never published. Only key names, length buckets and keyed digests. The canvas at `full` sends tool output, so an agent that reads a `.env` there sends what the scrubber did not recognise — see docs/canvas.md. |
 | File contents | Never leave the machine unless the canvas mirror is on; then tool output leaves at `full` only, scrubbed, to the relay you chose — see docs/canvas.md. |

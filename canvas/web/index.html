@@ -20,7 +20,9 @@
   --ink:#0D1014;
   --ink-2:#12161C;
   --ink-3:#191F27;
+  --ink-4:#20272F;
   --line:#232B35;
+  --line-2:#2C3540;
   --text:#E6E9EE;
   --text-2:#9AA5B4;
   --text-3:#66717F;
@@ -29,6 +31,7 @@
   --teal:#3FB6A0;
   --violet:#8E82D6;
   --rose:#D96B78;
+  --olive:#B7B75A;   /* the Codex flavour's accent, from the artboards */
 
   --warn:#E5A33C;
   --ok:#3FB6A0;
@@ -39,7 +42,9 @@
 
   --topbar:44px;
   --score-h:0px;
+  --drawer-w:0px;    /* 380px while the chat drawer is open: the strip, minimap and full-bleed modes make room */
 }
+body.drawer{--drawer-w:380px}
 *,*::before,*::after{box-sizing:border-box}
 html,body{height:100%}
 body{
@@ -116,7 +121,14 @@ a{color:inherit}
 /* ---------------------------------------------------------------- top bar */
 #top{position:fixed;left:0;right:0;top:0;height:var(--topbar);z-index:50;display:flex;align-items:center;gap:12px;
   padding:0 14px;backdrop-filter:blur(14px);background:color-mix(in oklab,var(--ink) 82%,transparent);
-  border-bottom:1px solid var(--ink-3)}
+  border-bottom:1px solid var(--ink-3);overflow:hidden}
+.seg{display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;font-family:var(--mono);font-size:12px;flex:none}
+.seg button{background:transparent;border:0;border-radius:0;padding:4px 11px;color:var(--text-2);white-space:nowrap}
+.seg button:hover{color:var(--text)}
+.seg button.on{background:var(--ink-3);color:var(--text);box-shadow:inset 0 0 0 1px var(--line-2)}
+.badge{min-width:16px;height:16px;border-radius:8px;background:var(--amber);color:#0D1014;font-family:var(--mono);font-size:10px;font-weight:600;
+  display:inline-flex;align-items:center;justify-content:center;padding:0 5px;margin-left:6px}
+#b-chat{display:inline-flex;align-items:center}
 .brand{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:13px;font-weight:600;letter-spacing:.02em;white-space:nowrap}
 .mark{width:20px;height:20px;flex:none}
 .mark line{stroke-width:2.4;stroke-linecap:round}
@@ -167,10 +179,26 @@ a{color:inherit}
 .pip.amber{background:var(--amber);color:var(--amber)}
 .pip.grey{background:var(--text-3);color:var(--text-3)}
 .win .nm{font-family:var(--mono);font-weight:600;color:var(--hue);white-space:nowrap;flex:none}
-.win .hm{font-family:var(--mono);color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.win .hm{font-family:var(--mono);color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex-shrink:10}   /* the first thing to give way in a crowded header */
 .win .st{font-family:var(--mono);color:var(--text-2);white-space:nowrap;margin-left:auto;flex:none}
+/* wake toggle: a control only when this browser holds the agent's owner token, else a label with a lock (§10.8) */
+.wake{display:inline-flex;align-items:center;gap:.5em;font-family:var(--mono);color:var(--text-3);white-space:nowrap;flex:none;
+  background:transparent;border:0;padding:0;font-size:inherit;cursor:default;line-height:1.5}
+.wake.ctl{cursor:pointer}
+.wake.ctl:hover .sw{border-color:var(--text-2)}
+.wake.on{color:var(--teal)}
+.wake.nolistener{color:var(--amber)}
+.wake svg{width:.9em;height:.9em;flex:none}
+.wake .wl{overflow:hidden;text-overflow:ellipsis}
+#stage[data-lod="window"] .win .hdr .wake .wl{display:none}   /* at window zoom the switch and its colour carry the state; the text returns at reading zoom */
+.sw{width:2.4em;height:1.3em;border-radius:.65em;background:var(--ink-4);border:1px solid var(--line-2);position:relative;flex:none;display:inline-block}
+.sw i{position:absolute;top:.15em;left:.15em;width:.9em;height:.9em;border-radius:50%;background:var(--text-3)}
+.sw.on{background:rgba(63,182,160,.25);border-color:var(--teal)}
+.sw.on i{left:1.35em;background:var(--teal)}
+.sw.hollow{background:transparent;border-style:dashed}
+.sw.hollow i{background:transparent;border:1px solid currentColor;width:.75em;height:.75em;top:.2em}
 .rolechip{font-family:var(--mono);border:1px solid var(--line);border-radius:999px;padding:2px 9px;background:transparent;
-  color:var(--text-3);white-space:nowrap;max-width:12em;overflow:hidden;text-overflow:ellipsis;flex:none;line-height:1.5}
+  color:var(--text-3);white-space:nowrap;max-width:12em;min-width:6em;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;line-height:1.5}
 .rolechip.hollow{border:1px dashed var(--hue);color:var(--hue)}
 .rolechip.solid{background:var(--hue);border-color:var(--hue);color:#0D1014;font-weight:500}
 .win .via{font-family:var(--mono);color:var(--amber);padding:4px 14px;border-bottom:1px solid var(--ink-3);
@@ -197,9 +225,9 @@ a{color:inherit}
 .row{position:relative;margin:0 0 10px;color:var(--text)}
 .row.prompt,.row.text,.row.thinking,.row.result{padding-right:5.5em}
 @keyframes reveal{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-.row.new{animation:reveal .4s ease-out}
+.row.new,#dcol>.new,#cout>.new{animation:reveal .4s ease-out}
 .row .ts{position:absolute;right:0;top:0;font-family:var(--mono);color:var(--text-3);font-size:.78em;opacity:.8}
-.row.prompt{border-left:3px solid var(--amber);padding:2px 0 2px 12px}
+.row.prompt{border-left:3px solid var(--amber);padding-left:12px;padding-top:2px;padding-bottom:2px}   /* longhands: the shorthand would reset the 5.5em gutter above */
 .row .lbl{font-family:var(--mono);font-size:.8em;letter-spacing:.1em;text-transform:uppercase;color:var(--amber);display:block;margin:0 0 2px}
 .row.text .p,.row.prompt .p{margin:0 0 .55em;white-space:pre-wrap;overflow-wrap:anywhere}
 .row.text .p:last-child,.row.prompt .p:last-child{margin-bottom:0}
@@ -220,13 +248,13 @@ a{color:inherit}
 .row.tool summary::before{content:"▸ "}
 .row.tool details[open] summary::before{content:"▾ "}
 .row.tool .omit{color:var(--text-3);margin-top:3px}
-.row.result{font-family:var(--mono);color:var(--text-3);padding:0 0 0 10px;border-left:2px solid var(--line);margin-top:-6px;font-size:.92em}
+.row.result{font-family:var(--mono);color:var(--text-3);padding-left:10px;border-left:2px solid var(--line);margin-top:-6px;font-size:.92em}
 .row.result.err{border-left-color:var(--rose);color:var(--rose)}
 .row.result details summary{cursor:pointer;color:var(--text-3);list-style:none}
 .row.result details summary::before{content:"▸ "}
 .row.result details[open] summary::before{content:"▾ "}
 .row.result pre{color:var(--text-2)}
-.row.thinking{font-family:var(--display);font-style:italic;color:var(--text-3);border-left:1px solid var(--violet);padding:0 0 0 12px;font-size:1.08em}
+.row.thinking{font-family:var(--display);font-style:italic;color:var(--text-3);border-left:1px solid var(--violet);padding-left:12px;font-size:1.08em}
 .row.thinking .tx{max-height:4.5em;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere;position:relative;cursor:pointer}
 .row.thinking .tx.open{max-height:none}
 .win.showthink .row.thinking .tx{max-height:none}
@@ -251,26 +279,25 @@ a{color:inherit}
   font-size:60px;display:none}
 .win:hover .dot .dn{display:block}
 
-/* thread + composer (reading tier only) */
-.thread{border-top:1px solid var(--ink-3);padding:8px 14px 10px;flex:none;font-size:13px;max-height:45%;overflow:auto}
-.ask{font-family:var(--mono);font-size:12.5px;margin:0 0 8px;padding:6px 10px;border-left:2px solid var(--text-3);background:var(--ink-3);border-radius:0 6px 6px 0}
-.ask .who{color:var(--text-3)}
-.ask .q{margin:2px 0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text)}
-.ask .state{color:var(--amber)}
-.ask.answered{border-left-color:var(--teal)}
-.ask.answered .state{color:var(--teal)}
-.ask.expired{border-left-color:var(--line);opacity:.6}
-.ask.expired .state{color:var(--text-3)}
-.ask .a{margin:4px 0 0;padding-top:4px;border-top:1px dashed var(--line);white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text-2)}
-.composer{display:flex;flex-direction:column;gap:6px}
-.composer textarea{font-family:var(--mono);font-size:12.5px;background:var(--ink);border:1px solid var(--line);border-radius:6px;padding:8px 10px;
-  resize:vertical;min-height:52px;color:var(--text)}
-.composer textarea:focus{border-color:var(--amber);outline:none}
-.composer .crow{display:flex;gap:10px;align-items:center;font-family:var(--mono);font-size:11px;color:var(--text-3)}
-.composer .crow button{margin-left:auto;font-family:var(--mono);font-size:12px;background:var(--amber);color:#0D1014;border:0;border-radius:6px;padding:4px 12px;font-weight:600}
-.composer .crow button:disabled{opacity:.5;cursor:default}
-.composer .note{color:var(--text-2);font-family:var(--sans);font-size:12px}
-.composer .cerr{color:var(--rose)}
+/* thread (reading tier only): the newest messages to and from this agent; the composer lives in the drawer */
+.thread{border-top:1px solid var(--ink-3);padding:8px 14px 10px;flex:none;font-size:13px;max-height:45%;overflow:auto;display:flex;flex-direction:column;gap:10px}
+.thread .open{align-self:flex-start;font-family:var(--mono);font-size:11.5px;color:var(--text-2);background:transparent;border:1px solid var(--line);border-radius:6px;padding:3px 9px}
+.thread .open:hover{color:var(--amber);border-color:var(--amber)}
+/* message items, shared by the drawer and the reading-tier thread */
+.msg{display:flex;flex-direction:column;gap:4px;min-width:0}
+.msg.fresh{padding:10px 12px;margin:0 -4px;background:var(--ink-3);border-radius:10px;border:1px solid var(--line-2)}
+.msg .mh{font-family:var(--mono);font-size:11px;color:var(--text-3);display:flex;gap:8px;align-items:center;min-width:0}
+.msg .mh i{width:7px;height:7px;border-radius:50%;background:var(--text-3);flex:none}
+.msg .mh .fr{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.msg .mh .to{color:var(--teal);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.msg .mh .when{margin-left:auto;flex:none}
+.chip{font-family:var(--mono);font-size:11px;border:1px solid var(--line-2);border-radius:999px;padding:0 6px;color:var(--text-2);white-space:nowrap;flex:none;line-height:1.5}
+.chip.ping{border-color:var(--amber);color:var(--amber)}
+.msg .mt{font-size:12.5px;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere}
+.msg .mf{font-family:var(--mono);font-size:10.5px;color:var(--text-3);display:flex;gap:6px;align-items:center;overflow-wrap:anywhere}
+.msg .mf.ok{color:var(--teal)}.msg .mf.bad{color:var(--rose)}.msg .mf.warn{color:var(--amber)}
+.msg .mf .pip{width:7px;height:7px;box-shadow:none}
+.msg .ma{font-size:12.5px;color:var(--text-2);border-left:2px solid var(--teal);padding-left:8px;white-space:pre-wrap;overflow-wrap:anywhere}
 .rs{position:absolute;right:0;bottom:0;width:22px;height:22px;cursor:nwse-resize;display:none;
   background:linear-gradient(135deg,transparent 55%,var(--line) 55%,var(--line) 65%,transparent 65%,transparent 80%,var(--line) 80%)}
 
@@ -292,7 +319,7 @@ a{color:inherit}
 #stage[data-lod="window"] .win .hdr{padding:12px 16px;font-size:16px}
 #stage[data-lod="window"] .win .nm{font-size:22px}
 #stage[data-lod="window"] .win .hm,#stage[data-lod="window"] .win .st{font-size:16px}
-#stage[data-lod="window"] .win .rolechip{font-size:15px}
+#stage[data-lod="window"] .win .rolechip,#stage[data-lod="window"] .win .wake{font-size:15px}
 #stage[data-lod="window"] .win .via{font-size:15px}
 #stage[data-lod="window"] .win .tabs{font-size:15px}
 #stage[data-lod="window"] .win .body{font-size:17px}
@@ -303,7 +330,7 @@ a{color:inherit}
 #stage[data-lod="reading"] .win .card,#stage[data-lod="reading"] .win .dot{display:none}
 #stage[data-lod="reading"] .win .nm{font-size:15px}
 #stage[data-lod="reading"] .win .hm,#stage[data-lod="reading"] .win .st{font-size:12px}
-#stage[data-lod="reading"] .win .rolechip{font-size:11.5px}
+#stage[data-lod="reading"] .win .rolechip,#stage[data-lod="reading"] .win .wake{font-size:11.5px}
 #stage[data-lod="reading"] .win .via{font-size:11.5px}
 #stage[data-lod="reading"] .win .tabs{font-size:12px}
 #stage[data-lod="reading"] .win .body{font-size:13.5px}
@@ -338,10 +365,10 @@ a{color:inherit}
 #help .fine{color:var(--text-3);font-size:12px;margin:16px 0 0;line-height:1.6}
 
 /* ---------------------------------------------------------------- score strip, minimap, legend */
-#score{position:fixed;left:0;right:0;bottom:0;z-index:40;background:color-mix(in oklab,var(--ink) 88%,transparent);
+#score{position:fixed;left:0;right:var(--drawer-w);bottom:0;z-index:40;background:color-mix(in oklab,var(--ink) 88%,transparent);
   border-top:1px solid var(--ink-3);backdrop-filter:blur(10px)}
 #score canvas{display:block;width:100%;cursor:pointer}
-#mini{position:fixed;right:14px;bottom:calc(var(--score-h) + 14px);z-index:41;width:200px;height:130px;
+#mini{position:fixed;right:calc(var(--drawer-w) + 14px);bottom:calc(var(--score-h) + 14px);z-index:41;width:200px;height:130px;
   background:color-mix(in oklab,var(--ink-2) 88%,transparent);border:1px solid var(--line);border-radius:8px;overflow:hidden;cursor:crosshair}
 #mini canvas{display:block;width:200px;height:130px}
 #legend{position:fixed;left:14px;bottom:calc(var(--score-h) + 14px);z-index:41;font-family:var(--mono);font-size:10.5px;color:var(--text-3);
@@ -358,18 +385,163 @@ a{color:inherit}
 #legend .ask i{border-color:var(--text-3);border-top-width:1px}
 #legend .more{color:var(--amber)}
 
+/* ---------------------------------------------------------------- desktop mode
+   One agent, full-bleed, in the visual grammar of its harness's desktop app:
+   a sidebar of agents and sessions, a centred transcript column, tool cards.
+   Two flavours — warm (Claude) and cooler (Codex) — chosen by the harness. */
+#desk,#cli{position:fixed;left:0;right:var(--drawer-w);top:var(--topbar);bottom:0;z-index:45;overflow:hidden;background:var(--ink)}
+#desk.codex,#desk.codex .side,#desk.codex .main{background:#0E1216}
+.side{position:absolute;left:0;top:0;bottom:0;width:260px;background:#0F1318;border-right:1px solid var(--line);padding:14px 12px;
+  display:flex;flex-direction:column;gap:4px;overflow:auto;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+.side h4{margin:8px 6px 4px;font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);font-weight:500}
+.ag{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:8px;font-family:var(--mono);font-size:12px;color:var(--text-2);
+  background:transparent;border:0;width:100%;text-align:left;white-space:nowrap}
+.ag:hover{color:var(--text)}
+.ag.on{background:var(--ink-3);color:var(--text);box-shadow:inset 0 0 0 1px var(--line-2)}
+.ag i{width:7px;height:7px;border-radius:50%;flex:none}
+.ag .nm{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.ag .st{margin-left:auto;font-size:10px;color:var(--text-3);flex:none}
+.ag.on .st.live{color:var(--teal)}
+.ses{padding:5px 10px 5px 26px;font-family:var(--mono);font-size:11px;color:var(--text-3);background:transparent;border:0;width:100%;text-align:left;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:6px}
+.ses:hover,.ses.on{color:var(--text-2)}
+.ses.sub{padding-left:40px}
+.side .foot{margin-top:auto;display:flex;flex-direction:column;gap:8px;padding-top:12px}
+.side .wakebox{padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:11px;display:flex}
+.side .wakebox .wake{font-size:11px;white-space:normal}
+.side label{font-family:var(--mono);font-size:11px;color:var(--text-2);display:flex;gap:8px;align-items:center;padding:0 4px;cursor:pointer}
+.side input[type=checkbox]{accent-color:var(--teal);width:12px;height:12px;margin:0}
+.side .keys{font-family:var(--mono);font-size:10.5px;color:var(--text-3);padding:0 4px;line-height:1.5}
+.main{position:absolute;left:260px;top:0;right:0;bottom:0;display:flex;flex-direction:column}
+#desk.codex .side{width:280px}
+#desk.codex .main{left:280px}
+.scroll{flex:1;overflow:auto;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+.col{width:min(780px,100% - 48px);margin:0 auto;padding:28px 0 20px;display:flex;flex-direction:column;gap:18px}
+#desk.codex .col{width:min(820px,100% - 48px);gap:14px;font-family:var(--mono)}
+.bub{align-self:flex-end;max-width:70%;background:var(--ink-3);border:1px solid var(--line-2);border-radius:14px 14px 4px 14px;padding:10px 14px;font-size:14px;color:var(--text)}
+.bub .p,.ans .p{margin:0 0 .55em;white-space:pre-wrap;overflow-wrap:anywhere}
+.bub .p:last-child,.ans .p:last-child{margin-bottom:0}
+.ans{font-size:14.5px;line-height:1.6;color:var(--text);max-width:720px}
+.ans pre,.bub pre,.cx pre{font-family:var(--mono);font-size:.9em;background:var(--ink);border:1px solid var(--ink-3);border-radius:6px;padding:8px 10px;margin:.4em 0;white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto}
+.ans code,.bub code,.cx code{font-family:var(--mono);font-size:.92em;background:var(--ink-3);border-radius:4px;padding:0 4px}
+.ans .cut{font-family:var(--mono);color:var(--text-3);font-size:.85em;display:block;margin-top:4px}
+.card{border:1px solid var(--line);border-radius:12px;background:var(--ink-2);overflow:hidden;max-width:720px}
+.card .h{display:flex;align-items:center;gap:10px;padding:10px 14px;font-family:var(--mono);font-size:12.5px;cursor:pointer;user-select:none}
+.card .h .k{color:var(--amber);flex:none}
+.card .h .s{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;color:var(--text)}
+.card .h .m{color:var(--text-3);margin-left:auto;flex:none;white-space:nowrap}
+.card .h .m.err{color:var(--rose)}
+.card .b{border-top:1px solid var(--line);padding:10px 14px;font-family:var(--mono);font-size:12px;color:var(--text-2);white-space:pre-wrap;overflow-wrap:anywhere;
+  background:var(--ink);max-height:360px;overflow:auto}
+.chev{width:10px;height:10px;border-right:1.5px solid var(--text-3);border-bottom:1.5px solid var(--text-3);transform:rotate(-45deg);flex:none;transition:transform .15s;margin-right:2px}
+.card.open .chev{transform:rotate(45deg)}
+.think{font-family:var(--display);font-style:italic;color:var(--text-3);border-left:1px solid var(--violet);padding-left:12px;font-size:15px;max-width:700px;
+  white-space:pre-wrap;overflow-wrap:anywhere;cursor:pointer}
+.think.clamp{max-height:4.8em;overflow:hidden}
+.comp{width:min(780px,100% - 48px);align-self:center;padding:14px 0 26px;flex:none}
+.comp div{border:1px solid var(--line);border-radius:14px;background:var(--ink-2);padding:14px 16px;font-family:var(--mono);font-size:12px;color:var(--text-3);
+  display:flex;justify-content:space-between;gap:12px;min-width:0}
+.comp div span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.comp div span:first-child{flex:1 1 auto;min-width:0;white-space:normal}
+.comp div span:last-child{flex:none}
+#desk.codex .comp{width:min(820px,100% - 48px)}
+#desk.codex .comp div{background:#0B0E12}
+.cx{display:flex;gap:12px;font-size:13px;color:var(--text);min-width:0}
+.cx .g{flex:none;color:var(--text-3)}
+.cx .g.dot{color:var(--olive)}
+.cx.text{color:var(--text-2)}
+.cx .tx{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.cx .tx .p{margin:0 0 .5em}.cx .tx .p:last-child{margin:0}
+.exec{border:1px solid var(--line);border-radius:8px;background:#0B0E12;max-width:760px}
+.exec .h{display:flex;gap:10px;padding:8px 12px;font-size:12px;color:var(--text);cursor:pointer;user-select:none}
+.exec .h .k{color:var(--olive);flex:none}
+.exec .h .s{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.exec .h .m{margin-left:auto;color:var(--text-3);flex:none;white-space:nowrap}
+.exec .h .m.err{color:var(--rose)}
+.exec .b{padding:8px 12px;font-size:12px;color:var(--text-3);white-space:pre-wrap;overflow-wrap:anywhere;border-top:1px solid #1B2129;max-height:360px;overflow:auto}
+.stateln{font-family:var(--mono);font-size:11px;color:var(--text-3);display:flex;gap:8px;align-items:center}
+.stateln.live{color:var(--teal)}
+.stateln .pip{width:7px;height:7px}
+.empty{font-family:var(--mono);font-size:12px;color:var(--text-3);padding:40px 0;text-align:center}
+
+/* ---------------------------------------------------------------- cli mode
+   The transcript as the harness's own terminal prints it, in a frame. */
+#cli{display:flex;flex-direction:column;align-items:center;padding:14px 24px 24px;gap:10px}
+.clitabs{display:flex;gap:6px;width:min(1000px,100%);font-family:var(--mono);font-size:11.5px;flex-wrap:wrap}
+.clitabs button{display:flex;align-items:center;gap:7px;background:transparent;border:1px solid var(--line);border-radius:6px;padding:4px 10px;color:var(--text-3)}
+.clitabs button:hover{color:var(--text-2)}
+.clitabs button.on{color:var(--text);background:var(--ink-2);border-color:var(--line-2)}
+.clitabs button i{width:7px;height:7px;border-radius:50%}
+.term{width:min(1000px,100%);flex:1;min-height:0;background:#0A0C0F;border:1px solid var(--line);border-radius:10px;box-shadow:0 30px 80px rgba(0,0,0,.5);
+  display:flex;flex-direction:column;overflow:hidden}
+.term .ttl{height:34px;display:flex;align-items:center;gap:8px;padding:0 12px;background:var(--ink-2);border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--text-3);flex:none}
+.term .ttl i{width:10px;height:10px;border-radius:50%;background:var(--line-2);flex:none}
+.term .ttl b{margin-left:8px;font-weight:500;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.term .ttl .st{margin-left:auto;white-space:nowrap;flex:none}
+.term .ttl .st.live{color:var(--teal)}
+.term .out{margin:0;padding:14px 16px;font-family:var(--mono);font-size:12.5px;line-height:1.55;color:#C9D1DB;white-space:pre-wrap;overflow-wrap:anywhere;
+  flex:1;overflow:auto;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+.ln{margin:0 0 .9em}
+.ln:last-child{margin-bottom:0}
+.c-p{color:var(--text)}.c-a{color:var(--amber)}.c-d{color:var(--text-3)}.c-t{color:var(--teal)}.c-e{color:var(--rose)}.c-v{color:var(--violet);font-style:italic}.c-u{color:var(--olive)}
+.cur{display:inline-block;width:8px;height:14px;background:var(--text);vertical-align:-2px;animation:bl 1s steps(1) infinite}
+@keyframes bl{50%{opacity:0}}
+
+/* ---------------------------------------------------------------- chat drawer
+   Every message in the room in seq order, git-ref messages interleaved,
+   and the one composer. Right edge, 380 wide, `c` toggles. */
+#drawer{position:fixed;right:0;top:var(--topbar);bottom:0;width:380px;max-width:100vw;z-index:60;background:var(--ink-2);border-left:1px solid var(--line);
+  display:flex;flex-direction:column;box-shadow:-24px 0 60px rgba(0,0,0,.35)}
+#drawer .dh{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line);font-family:var(--mono);flex:none}
+#drawer .dh b{font-weight:600;font-size:13px}
+#drawer .dh .seg{margin-left:6px}
+#drawer .dh .esc{margin-left:auto;font-size:11px;color:var(--text-3);background:transparent;border:0;font-family:var(--mono)}
+#drawer .dh .esc:hover{color:var(--text)}
+#dlist{flex:1;overflow:auto;padding:12px 16px;display:flex;flex-direction:column;gap:14px;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+#dfoot{border-top:1px solid var(--line);padding:12px 16px;display:flex;flex-direction:column;gap:8px;background:var(--ink);flex:none}
+#dfoot .crow{display:flex;gap:8px;align-items:center;min-width:0}
+#dto{font-family:var(--mono);font-size:11px;border:1px solid var(--teal);border-radius:999px;padding:2px 22px 2px 9px;color:var(--teal);background:transparent;
+  max-width:14em;overflow:hidden;text-overflow:ellipsis;appearance:none;-webkit-appearance:none;cursor:pointer;
+  background-image:linear-gradient(45deg,transparent 50%,var(--teal) 50%),linear-gradient(135deg,var(--teal) 50%,transparent 50%);
+  background-position:calc(100% - 12px) 55%,calc(100% - 8px) 55%;background-size:4px 4px,4px 4px;background-repeat:no-repeat}
+#dto option{background:var(--ink-2);color:var(--text)}
+#dtext{font-family:var(--mono);border:1px solid var(--line);border-radius:8px;background:var(--ink-2);padding:10px 12px;font-size:12px;color:var(--text);min-height:58px;resize:vertical;width:100%}
+#dtext:focus{border-color:var(--amber);outline:none}
+#dfoot label{font-family:var(--mono);font-size:11px;color:var(--text-2);display:flex;align-items:center;gap:6px;white-space:nowrap}
+#dfoot label.off{color:var(--text-3)}
+#dfoot input[type=checkbox]{accent-color:var(--teal);width:12px;height:12px;margin:0}
+#dfoot .cnt{font-family:var(--mono);font-size:10.5px;color:var(--text-3)}
+#dsend{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--amber);border:1px solid var(--amber);border-radius:6px;padding:5px 10px;background:transparent;white-space:nowrap}
+#dsend:disabled{opacity:.5;cursor:default}
+#dnote{font-family:var(--mono);font-size:10.5px;color:var(--text-3);line-height:1.4;min-height:1.4em}
+#dnote.err{color:var(--rose)}
+#dnote.ok{color:var(--teal)}
+
 /* ---------------------------------------------------------------- motion + small screens */
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation:none!important;transition:none!important}
 }
 @media (max-width:640px){
-  #top{gap:8px;padding:0 10px}
-  #roomname{font-size:16px}
-  #top .who,#top .tb .wide{display:none}
+  #top{gap:6px;padding:0 8px}
+  #roomname,#top .who,#top .tb .wide,#b-help,#b-fit,#demotag,.brand .word{display:none}
+  .seg button{padding:4px 6px;font-size:11px}
   #mini{width:120px;height:78px}
   #mini canvas{width:120px;height:78px}
   #legend{display:none}
-  .pill{font-size:10.5px;padding:3px 8px}
+  /* the pill gives way first and collapses to its dot: the colour still says live, warn or bad */
+  .pill{font-size:10.5px;padding:3px 8px;flex:0 1 auto;min-width:24px;overflow:hidden;text-overflow:ellipsis;display:block;line-height:1.6}
+  .pill::before{display:inline-block;margin-right:6px}
+  #top .tb button{padding:4px 7px}
+  body.drawer{--drawer-w:0px}
+  #drawer{width:100vw}
+  #desk{display:flex;flex-direction:column}
+  #desk[hidden]{display:none}
+  .side,#desk.codex .side{position:static;width:100%;flex:none;flex-direction:row;align-items:center;gap:6px;padding:8px;border-right:0;border-bottom:1px solid var(--line);overflow-x:auto}
+  .side h4,.ses,.side .foot{display:none}
+  .ag{width:auto;padding:6px 10px}
+  .main,#desk.codex .main{position:static;left:0;flex:1;min-height:0}
+  .bub{max-width:92%}
+  #cli{padding:8px}
 }
 </style>
 </head>
@@ -425,20 +597,73 @@ a{color:inherit}
       <line x1="6" y1="10" x2="26" y2="10" stroke="#E5A33C"/>
       <line x1="6" y1="16" x2="19" y2="16" stroke="#3FB6A0"/>
       <line x1="6" y1="22" x2="23" y2="22" stroke="#8E82D6"/>
-    </svg>canvas
+    </svg><span class="word">canvas</span>
   </span>
   <span id="roomname"></span>
   <span class="tag" id="demotag" hidden>demo</span>
+  <div class="seg" id="modeseg" role="tablist" aria-label="view mode">
+    <button type="button" data-mode="canvas" class="on" title="every agent on one canvas (v cycles, esc returns)">canvas</button>
+    <button type="button" data-mode="desktop" title="one agent as its desktop app would show it (v cycles)">desktop</button>
+    <button type="button" data-mode="cli" title="one agent as its terminal would print it (v cycles)">cli</button>
+  </div>
   <span class="pill" id="pill">connecting</span>
   <span class="sp"></span>
   <input id="search" placeholder="find an agent" hidden>
   <span class="who" id="who"></span>
   <div class="tb">
+    <button id="b-chat" title="the room's messages and the composer (c)">chat<span class="badge" id="chatbadge" hidden>0</span></button>
     <button id="b-fit" title="fit everything (0)">fit</button>
     <button id="b-think" class="wide" title="show thinking in every window (t)">thinking</button>
     <button id="b-score" class="wide on" title="score strip (s)">score</button>
     <button id="b-help" title="keyboard help (?)">?</button>
     <button id="b-leave" title="back to the entry screen">leave</button>
+  </div>
+</div>
+
+<div id="desk" hidden>
+  <div class="side" id="dside"></div>
+  <div class="main">
+    <div class="scroll" id="dscroll"><div class="col" id="dcol"></div></div>
+    <div class="comp"><div><span id="dcomp1"></span><span id="dcomp2"></span></div></div>
+  </div>
+</div>
+
+<div id="cli" hidden>
+  <div class="clitabs" id="clitabs"></div>
+  <div class="term">
+    <div class="ttl"><i></i><i></i><i></i><b id="ctitle"></b><span class="st" id="cstate"></span></div>
+    <div class="out" id="cout"></div>
+  </div>
+</div>
+
+<div id="drawer" hidden>
+  <div class="dh">
+    <b>room</b>
+    <div class="seg" id="dfilter">
+      <button type="button" data-f="all" class="on">all</button>
+      <button type="button" data-f="ask">asks</button>
+      <button type="button" data-f="ping">pings</button>
+      <button type="button" data-f="git">git</button>
+    </div>
+    <button type="button" class="esc" id="dclose" title="close the drawer (esc)">esc</button>
+  </div>
+  <div id="dlist"></div>
+  <div id="dfoot">
+    <div class="crow">
+      <select id="dto" aria-label="recipient"></select>
+      <div class="seg" id="dkind">
+        <button type="button" data-k="say" class="on">say</button>
+        <button type="button" data-k="ask">ask</button>
+        <button type="button" data-k="ping">ping</button>
+      </div>
+    </div>
+    <textarea id="dtext" rows="2" maxlength="2000" placeholder="ask, ping or say something to the room…" spellcheck="true"></textarea>
+    <div class="crow">
+      <label id="dwakel"><input type="checkbox" id="dwake">wake them if idle</label>
+      <span class="cnt" id="dcnt">0/2000</span>
+      <button id="dsend" type="button">send ⌘⏎</button>
+    </div>
+    <div id="dnote"></div>
   </div>
 </div>
 
@@ -459,15 +684,18 @@ a{color:inherit}
       <dt>0</dt><dd>fit every window</dd>
       <dt>1</dt><dd>100%</dd>
       <dt>arrows</dt><dd>pan</dd>
-      <dt>f · double-click</dt><dd>zoom to the selected window (reading)</dd>
+      <dt>f</dt><dd>zoom to the selected window (reading); in desktop or cli mode, browser fullscreen</dd>
+      <dt>v</dt><dd>cycle canvas → desktop → cli</dd>
+      <dt>double-click a header</dt><dd>open that agent in the last desktop or cli mode</dd>
+      <dt>c</dt><dd>the chat drawer: every message in the room, and the composer</dd>
       <dt>/</dt><dd>find an agent by name</dd>
       <dt>t</dt><dd>show thinking in every window</dd>
       <dt>s</dt><dd>toggle the score strip</dd>
       <dt>shift + G</dt><dd>re-grid every window, forgetting moved positions</dd>
       <dt>?</dt><dd>this help</dd>
-      <dt>esc</dt><dd>close popovers</dd>
+      <dt>esc</dt><dd>close popovers, then the drawer, then back to the canvas</dd>
     </dl>
-    <p class="fine">Nothing typed here reaches an agent before its next sync. A role is a suggestion; an ask is a question framed as untrusted. Neither can make an agent do anything its user did not allow.</p>
+    <p class="fine">Nothing typed here reaches an agent before its next sync. A role is a suggestion; a message is information framed as untrusted. A ping with wake on can start a session on the agent's machine, only if its owner allowed that. None of it can make an agent do anything its user did not allow.</p>
   </div>
 </div>
 
@@ -534,20 +762,25 @@ function lsSet(key, value) {
 const POSITIONAL = new Set(["text", "thinking", "tool_call", "tool_result", "prompt", "session", "gap"]);
 const WIN_W = 560, WIN_H = 640, CELL_W = 640, CELL_H = 720;
 const ROLE_PRESETS = ["reviewer", "implementer", "tester", "docs", "scout", "pair"];
-const WIRE = { "heads-up": "HU", question: "Q", reply: "A", decision: "D", note: "NOTE", handoff: "TASK", blocked: "BLK", review: "REV", finding: "FIND", "bug-report": "BUG" };
+const WIRE = { "heads-up": "HU", question: "Q", reply: "A", decision: "D", note: "NOTE", handoff: "TASK", blocked: "BLK", review: "REV", finding: "FIND", "bug-report": "BUG", ping: "PING" };
+const WAKE_DEFAULT = { enabled: false, from: "agents", max_per_hour: 4, used_this_hour: 0, listener: "absent", set_by: null, ts: null };   /* §10.3, when never set */
+const DRAWER_W = 380;
 
 const S = {
   room: "", viewer: "", demo: false,
-  agents: new Map(), asks: new Map(), records: new Map(),
+  agents: new Map(), messages: new Map(), records: new Map(),
   lastRseq: 0, maxRow: 0, helloRseq: 0, backfill: null, backfilling: false,
   policy: null, policyRseq: 0, roomName: "",
   live: false, hadHello: false,
-  transports: [], tIndex: 0, transport: null, openFails: 0, gotHelloThisOpen: false,
-  ws: null, es: null, pollTimer: null, roomTimer: null, reconnectTimer: null, backoff: 1000, stopped: false,
+  transports: [], tIndex: 0, transport: null, openFails: 0, gotHelloThisOpen: false, probeFailed: false,
+  ws: null, es: null, pollTimer: null, roomTimer: null, reconnectTimer: null, backoff: 1000, stopped: false, fullLabel: "",
   ticket: null, pingTimer: null,
   tier: "window", sel: null, showThinking: lsGet("canvas:thinking", false),
   gapBefore: null, positions: {}, layoutDone: false,
   dirtyAgents: new Set(), raf: 0, edgesTimer: 0, edgesDirty: false, scoreDirty: true, miniDirty: true,
+  /* v1.3: one state, three modes; the drawer; owner tokens */
+  mode: "canvas", lastMode: "desktop", focus: null, follow: lsGet("canvas:follow", true), followAt: 0, focusDirty: false, view: null,
+  drawer: false, drawerSeenSeq: 0, drawerDirty: false, dfilter: "all", msgHistory: false, probing: false,
 };
 const V = { x: 0, y: 0, k: 1 };
 
@@ -556,7 +789,8 @@ function agentOf(name) {
   if (!a) {
     a = { name, hue: hueOf(name), meta: null, role: null, roleRseq: 0, roleSeenSeq: 0, roleSeenAt: 0, snapshot: null,
           lanes: new Map(), kicked: false, lastTs: 0, ended: false, endedAt: 0, pinned: false, win: null,
-          active: null, activePinned: false, tabsDirty: true, sparkAt: 0 };
+          active: null, activePinned: false, tabsDirty: true, sparkAt: 0,
+          wake: null, wakePending: null };   /* wake: the relay's copy of §10.3; wakePending: a flip this browser made, hollow until the machine echoes it */
     S.agents.set(name, a);
   }
   return a;
@@ -566,7 +800,7 @@ function laneOf(a, session, lane) {
   let l = a.lanes.get(key);
   if (!l) {
     l = { key, session, lane, events: [], ids: new Set(), byRef: new Map(), title: null, firstTs: 0, newestTs: 0,
-          dirty: true, rebuild: true, from: -1, rows: new Map(), el: el("div", "rows"), follow: true, unseen: 0, exhausted: false, fetching: false };
+          dirty: true, rebuild: true, from: -1, tailHidden: 0, rows: new Map(), el: el("div", "rows"), follow: true, unseen: 0, exhausted: false, fetching: false };
     a.lanes.set(key, l);
     a.tabsDirty = true;
   }
@@ -616,6 +850,11 @@ function ingestEvent(a, ev, rseq, back) {
   l.dirty = true; S.scoreDirty = true;
   if (!a.active || (l.key !== a.active && !a.activePinned)) a.tabsDirty = true;   /* the newest lane leads until the viewer picks a tab */
   if (!ev._back && a.win && !REDUCED.matches) flashHeader(a);
+  /* follow the busiest: in desktop and cli mode the focus moves to whoever produced the newest live event,
+     held for 1.5 s so two agents trading blows do not make the screen strobe */
+  if (!ev._back && S.follow && S.mode !== "canvas" && a.name !== S.focus && !a.kicked && Date.now() - S.followAt > 1500) {
+    S.focus = a.name; S.followAt = Date.now(); S.focusDirty = true;
+  }
   markDirty(a);
 }
 function applyRecord(ev) {
@@ -629,20 +868,35 @@ function applyRecord(ev) {
 }
 function applyAnswer(a, ev) {
   const b = ev.body || {};
-  const ask = typeof b.ask === "string" && S.asks.get(b.ask);
-  if (!ask || ask.state !== "open") return;
-  /* the relay's answered ask frame follows in the next row; showing the text now saves the viewer a beat */
-  ask.state = "answered"; ask.answer = { text: str(b.text), ts: ev.ts };
-  markDirty(agentOf(ask.to)); edgesSoon();
+  const m = typeof b.ask === "string" && S.messages.get(b.ask);
+  if (!m || m.kind !== "ask" || m.state !== "open") return;
+  /* the relay's answered message frame follows in the next row; showing the text now saves the viewer a beat */
+  m.state = "answered"; m.answer = { text: str(b.text), ts: ev.ts };
+  markDirty(agentOf(m.to)); drawerSoon(); edgesSoon();
 }
-function applyAsk(ask, rseq) {
-  if (!ask || typeof ask.id !== "string") return;
-  const cur = S.asks.get(ask.id);
+/* §10.1: one message object per id; a new row for every state or wake change keeps the id, and the newest by rseq wins */
+function applyMessage(m, rseq) {
+  if (!m || typeof m.id !== "string") return;
+  const cur = S.messages.get(m.id);
   if (cur && cur._rseq > rseq) return;
-  ask._rseq = rseq;
-  S.asks.set(ask.id, ask);
-  if (typeof ask.to === "string") markDirty(agentOf(ask.to));
-  edgesSoon();
+  m._rseq = rseq | 0;
+  m._t = parseTs(m.ts) || (cur ? cur._t : Date.now());
+  m._fresh = cur ? cur._fresh : S.live;
+  m.seq = m.seq | 0;
+  m.kind = m.kind === "ping" || m.kind === "say" ? m.kind : "ask";
+  if (!m.from || typeof m.from !== "object") m.from = { kind: "viewer", name: "" };
+  if (!m.wake || typeof m.wake !== "object") m.wake = { requested: false, state: "none", reason: null, ts: null };
+  S.messages.set(m.id, m);
+  if (S.messages.size > 3000) { for (const k of S.messages.keys()) { S.messages.delete(k); break; } }   /* 7-day retention on the relay; the tab keeps the newest few thousand */
+  if (typeof m.to === "string" && m.to !== "*") markDirty(agentOf(m.to));
+  drawerSoon(); edgesSoon();
+}
+/* A relay still on v1.2 during the rollout sends `ask` rows and `room.asks`; they are reshaped into messages so the
+   drawer keeps reading. Nothing is ever sent in the old shape. */
+function askAsMessage(k) {
+  if (!k || typeof k !== "object") return null;
+  return { id: k.id, seq: k.seq, kind: "ask", to: k.to, from: { kind: "viewer", name: str(k.viewer) }, text: k.text, ts: k.ts,
+           state: k.state, answer: k.answer || null, wake: { requested: false, state: "none", reason: null, ts: null } };
 }
 function applyRole(name, role, rseq) {
   const a = agentOf(name);
@@ -655,6 +909,7 @@ function applyAgentObj(o, rseq) {
   const a = agentOf(o.name);
   a.meta = { harness: str(o.harness), human: str(o.human), model: str(o.model), stream: str(o.stream), registered_at: o.registered_at, last_seen: o.last_seen };
   a.kicked = !!o.kicked;
+  if (o.wake && typeof o.wake === "object") a.wake = Object.assign({}, WAKE_DEFAULT, o.wake);
   if (o.role && typeof o.role === "object") applyRole(o.name, o.role, Math.max(rseq || 0, o.role.set_seq | 0));
   else if (o.role === null && rseq) applyRole(o.name, null, rseq);
   if (o.snapshot && typeof o.snapshot === "object") {
@@ -663,11 +918,14 @@ function applyAgentObj(o, rseq) {
     if (seen !== a.roleSeenSeq) { a.roleSeenSeq = seen; a.roleSeenAt = parseTs(o.last_seen) || Date.now(); }
     if (o.snapshot.state === "gone") { a.ended = true; a.endedAt = a.endedAt || Date.now(); }
     else if (o.snapshot.state && o.snapshot.state !== "idle") a.ended = false;
+    /* a flipped switch draws hollow until the machine's own snapshot says the same (§10.8): the machine is authoritative */
+    const sw = o.snapshot.wake;
+    if (a.wakePending && sw && typeof sw === "object" && !!sw.enabled === a.wakePending.enabled) a.wakePending = null;
   }
   const seenAt = parseTs(o.last_seen);
   if (seenAt > a.lastTs) a.lastTs = seenAt;
   ensureWindow(a);
-  markDirty(a); edgesSoon();
+  markDirty(a); drawerSoon(); edgesSoon();
 }
 function applyRoom(room) {
   if (!room || typeof room !== "object") return;
@@ -676,7 +934,9 @@ function applyRoom(room) {
   if (room.policy) S.policy = room.policy;
   const rseq = room.rseq | 0;
   for (const o of room.agents || []) applyAgentObj(o, rseq);
-  for (const ask of room.asks || []) applyAsk(ask, rseq);
+  for (const m of room.messages || []) applyMessage(m, rseq);
+  for (const k of room.asks || []) applyMessage(askAsMessage(k), rseq);   /* v1.2 relay, see askAsMessage */
+  probeOwnerTokens();
 }
 function rowSeen(rseq) {
   rseq = rseq | 0;
@@ -697,7 +957,9 @@ function ingest(f, back) {
       for (const e of f.events || []) ingestEvent(a, e, f.rseq, back);
       break;
     }
-    case "ask": rowSeen(f.rseq); applyAsk(f.ask, f.rseq | 0); break;
+    case "message": rowSeen(f.rseq); applyMessage(f.message, f.rseq | 0); break;
+    case "ask": rowSeen(f.rseq); applyMessage(askAsMessage(f.ask), f.rseq | 0); break;   /* v1.2 relay, see askAsMessage */
+    case "wake": break;   /* agent-stream only (§10.5); a viewer never receives one, and ignores it if it does */
     case "role": rowSeen(f.rseq); if (typeof f.agent === "string") applyRole(f.agent, f.role, f.rseq | 0); break;
     case "policy": rowSeen(f.rseq); if ((f.rseq | 0) >= S.policyRseq) { S.policy = f.policy; S.policyRseq = f.rseq | 0; } break;
     case "agent": applyAgentObj(f.agent, 0); break;
@@ -718,7 +980,8 @@ function onLive() {
   S.live = true; S.backfilling = false;
   S.lastRseq = Math.max(S.lastRseq, S.helloRseq, S.maxRow);
   for (const r of S.records.values()) r.fresh = false;
-  updatePill();
+  for (const m of S.messages.values()) m._fresh = false;
+  updatePill(); drawerSoon();
   if (S.gapBefore) {
     let earliest = 0;
     for (const a of S.agents.values()) for (const l of a.lanes.values()) if (l.firstTs && (!earliest || l.firstTs < earliest)) earliest = l.firstTs;
@@ -729,8 +992,7 @@ function onLive() {
 }
 function onFull() {
   closeStream();
-  setPill("bad", "relay full — waiting");
-  S.backoff = 15000; scheduleReconnect();
+  S.backoff = 15000; scheduleReconnect("relay full — waiting");   /* the countdown keeps this label, so a full room never reads as an unreachable relay */
 }
 function onGone() {
   closeStream(); S.stopped = true;
@@ -742,14 +1004,16 @@ function onGone() {
    The room code is sent only as a bearer header on the routes the contract
    lists, and the ticket only as ?ticket= on /stream. Same origin, relative
    URLs: the relay serves this page. */
-async function api(method, path, body) {
-  const init = { method, headers: { Authorization: "Bearer " + S.room } };
+async function apiAs(credential, method, path, body) {
+  const init = { method, headers: { Authorization: "Bearer " + credential } };
   if (body !== undefined) { init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(body); }
   const res = await fetch(path, init);
   let json = null;
   try { json = await res.json(); } catch (e) { json = null; }
   return { status: res.status, json };
 }
+/* the room code, on the routes it grants; an owner token goes only through apiAs, only to the three routes of §10.2 */
+function api(method, path, body) { return apiAs(S.room, method, path, body); }
 function hintOf(r, fallback) { return (r.json && typeof r.json.hint === "string") ? r.json.hint : fallback; }
 function roomPath(rest) { return "/r/" + encodeURIComponent(S.room) + rest; }
 
@@ -775,9 +1039,10 @@ async function connect() {
   if (S.demo) { startDemo(); return; }
   try {
     if (!S.transports.length) {
-      const r = await fetch("/healthz").then((x) => x.json()).catch(() => null);
-      const adv = r && Array.isArray(r.transports) ? r.transports.filter((t) => t === "ws" || t === "sse") : [];
-      S.transports = adv.concat(["poll"]);
+      const adv = await probeTransports();
+      /* a probe that failed is not an answer: polling is used for now and the probe runs again on the 60 s room refresh (startPoll) */
+      S.probeFailed = adv === null;
+      S.transports = (adv || []).concat(["poll"]);
     }
     S.transport = S.transports[Math.min(S.tIndex, S.transports.length - 1)];
     S.gotHelloThisOpen = false;
@@ -787,6 +1052,15 @@ async function connect() {
   } catch (e) {
     if (!S.stopped) openFailed();
   }
+}
+/* null when /healthz could not be read (cold Worker, proxy error page), else the advertised stream transports */
+async function probeTransports() {
+  try {
+    const res = await fetch("/healthz");
+    if (!res.ok) return null;
+    const r = await res.json();
+    return Array.isArray(r.transports) ? r.transports.filter((t) => t === "ws" || t === "sse") : [];
+  } catch (e) { return null; }
 }
 function afterQuery() { return S.hadHello && S.lastRseq > 0 ? "&after=" + S.lastRseq : ""; }
 async function openWS() {
@@ -819,7 +1093,7 @@ function openFailed() {
   if (S.openFails >= 2 && S.tIndex < S.transports.length - 1) { S.tIndex++; S.openFails = 0; S.backoff = 1000; }
   scheduleReconnect();
 }
-function scheduleReconnect() {
+function scheduleReconnect(label) {
   if (S.stopped || S.reconnectTimer) return;
   S.live = false;
   const wait = S.backoff;
@@ -827,7 +1101,7 @@ function scheduleReconnect() {
   const due = Date.now() + wait;
   const tick = () => {
     const left = Math.max(0, Math.ceil((due - Date.now()) / 1000));
-    setPill("warn", "reconnecting in " + left + " s");
+    setPill(label ? "bad" : "warn", (label ? label + " · retrying" : "reconnecting") + " in " + left + " s");
     if (Date.now() >= due) { S.reconnectTimer = null; connect(); } else S.reconnectTimer = setTimeout(tick, 250);
   };
   tick();
@@ -846,7 +1120,10 @@ async function startPoll() {
   if (snap.status !== 200 || !snap.json) throw new Error("snapshot " + snap.status);
   S.hadHello = true; S.gotHelloThisOpen = true; S.openFails = 0; S.backoff = 1000;
   const fresh = !S.layoutDone;
-  S.backfill = "tail"; S.backfilling = fresh; S.helloRseq = snap.json.rseq | 0;
+  S.backfill = "tail"; S.backfilling = fresh;
+  /* only a fresh bootstrap takes the snapshot's position: falling back to polling mid-session keeps lastRseq where the
+     stream left it, so the first GET /events?after= replays the rows the outage hid instead of skipping them */
+  if (fresh) S.helloRseq = snap.json.rseq | 0;
   applyRoom(snap.json);
   if (fresh) {
     S.lastRseq = S.helloRseq;
@@ -865,23 +1142,36 @@ async function startPoll() {
         before = Math.min.apply(null, frames.map((f) => f.rseq | 0));
       }
     }
-  } else S.lastRseq = Math.max(S.lastRseq, S.helloRseq);
+  }
   onLive();
   clearInterval(S.pollTimer); clearInterval(S.roomTimer);
   S.pollTimer = setInterval(pollOnce, 5000);
   S.roomTimer = setInterval(async () => {          /* snapshots reach a polling viewer only through the room object */
+    if (S.probeFailed) {
+      /* polling only because /healthz failed once: ask again, and move to the stream it advertises */
+      const adv = await probeTransports();
+      if (adv && adv.length) { S.probeFailed = false; S.transports = adv.concat(["poll"]); S.tIndex = 0; S.openFails = 0; closeStream(); connect(); return; }
+    }
     const r = await api("GET", roomPath("")).catch(() => null);
     if (r && r.status === 200 && r.json) applyRoom(r.json);
   }, 60000);
 }
+let polling = false;
 async function pollOnce() {
-  if (S.stopped || S.transport !== "poll") return;
-  let r = null;
-  try { r = await api("GET", roomPath("/events?after=" + S.lastRseq + "&limit=200")); } catch (e) { r = null; }
-  if (!r || r.status !== 200 || !r.json) { setPill("warn", "polling · relay unreachable"); return; }
-  for (const f of r.json.frames || []) ingest(f);
-  S.lastRseq = Math.max(S.lastRseq, r.json.rseq | 0);
-  updatePill();
+  if (S.stopped || S.transport !== "poll" || polling) return;
+  polling = true;
+  try {
+    /* the response rseq is the room's position, not the last row delivered; lastRseq moves only through rowSeen,
+       and a page that says `more` is followed at once rather than in five seconds */
+    for (let page = 0; page < 20; page++) {
+      let r = null;
+      try { r = await api("GET", roomPath("/events?after=" + S.lastRseq + "&limit=200")); } catch (e) { r = null; }
+      if (!r || r.status !== 200 || !r.json) { setPill("warn", "polling · relay unreachable"); return; }
+      for (const f of r.json.frames || []) ingest(f);
+      if (!r.json.more || !(r.json.frames || []).length) break;
+    }
+    updatePill();
+  } finally { polling = false; }
 }
 
 /* ---------------------------------------------------------------- pill, banner, entry */
@@ -890,15 +1180,18 @@ function updatePill() {
   if (S.stopped) return;
   const n = Array.from(S.agents.values()).filter((a) => !a.kicked).length;
   const agents = n + " agent" + (n === 1 ? "" : "s");
-  if (S.demo) setPill("live", "demo · " + agents);
-  else if (S.transport === "poll") setPill("warn", "polling · " + agents);
-  else if (S.live) setPill("live", "live" + (S.transport === "sse" ? " (sse)" : "") + " · " + agents);
+  /* in desktop and cli mode the pill names the agent on screen; the connection state keeps its colour */
+  const tail = S.mode !== "canvas" && S.focus ? (S.follow ? "following · " : "") + S.focus : agents;
+  if (S.demo) setPill("live", "demo · " + tail);
+  else if (S.transport === "poll") setPill("warn", "polling · " + tail);
+  else if (S.live) setPill("live", "live" + (S.transport === "sse" ? " (sse)" : "") + " · " + tail);
 }
 function showBanner(text) { $("bannertext").textContent = text; $("banner").hidden = false; }
 $("bannerx").onclick = () => { $("banner").hidden = true; };
 
 function showEntry(message) {
   $("entry").hidden = false; $("stage").hidden = true; $("top").hidden = true; $("score").hidden = true; $("mini").hidden = true; $("legend").hidden = true;
+  $("desk").hidden = true; $("cli").hidden = true; $("drawer").hidden = true; document.body.classList.remove("drawer");
   $("entryerr").textContent = message || "";
   $("viewer").value = lsGet("canvas:name", "");
   const recent = lsGet("canvas:recent", []);
@@ -929,25 +1222,28 @@ function enterRoom(code, name) {
   resetRoom();
   S.room = code; S.viewer = name || "anonymous"; S.demo = code === "demo";
   $("entry").hidden = true; $("stage").hidden = false; $("top").hidden = false;
-  $("score").hidden = !lsGet("canvas:score", true); $("mini").hidden = false; $("legend").hidden = false;
-  $("b-score").classList.toggle("on", !$("score").hidden);
+  $("b-score").classList.toggle("on", lsGet("canvas:score", true));
   $("demotag").hidden = !S.demo;
   $("who").textContent = "as " + S.viewer;
   $("roomname").textContent = S.demo ? "demo" : "room";   /* the name arrives with hello; the code itself stays out of the title bar */
   S.positions = lsGet("canvas:pos:" + code, {});
+  setMode("canvas");
   sizeScore();
   setPill("warn", "connecting");
   connect();
 }
 function resetRoom() {
   closeStream(); stopDemo();
-  Object.assign(S, { room: "", demo: false, agents: new Map(), asks: new Map(), records: new Map(), lastRseq: 0, maxRow: 0, helloRseq: 0,
-    backfill: null, backfilling: false, policy: null, policyRseq: 0, roomName: "", live: false, hadHello: false, transports: [], tIndex: 0,
-    transport: null, openFails: 0, ticket: null, stopped: false, sel: null, gapBefore: null, layoutDone: false, backoff: 1000 });
+  Object.assign(S, { room: "", demo: false, agents: new Map(), messages: new Map(), records: new Map(), lastRseq: 0, maxRow: 0, helloRseq: 0,
+    backfill: null, backfilling: false, policy: null, policyRseq: 0, roomName: "", live: false, hadHello: false, transports: [], tIndex: 0, probeFailed: false,
+    transport: null, openFails: 0, ticket: null, stopped: false, sel: null, gapBefore: null, layoutDone: false, backoff: 1000,
+    mode: "canvas", focus: null, view: null, focusDirty: false, drawer: false, drawerSeenSeq: 0, dfilter: "all", msgHistory: false, probing: false, kindPicked: false, dto: null });
   S.dirtyAgents.clear();
   for (const w of Array.from($("world").querySelectorAll(".win"))) w.remove();
   $("elayer").replaceChildren(); $("llayer").replaceChildren(); $("player").replaceChildren();
   $("elsewhere").hidden = true; $("viewers").hidden = true; $("banner").hidden = true;
+  $("dlist").replaceChildren(); $("dcol").replaceChildren(); $("cout").replaceChildren(); $("drawer").hidden = true; document.body.classList.remove("drawer");
+  $("chatbadge").hidden = true;
   V.x = 0; V.y = 0; V.k = 1; applyView();
 }
 $("b-leave").onclick = () => { history.replaceState(null, "", location.pathname); resetRoom(); showEntry(""); };
@@ -1014,7 +1310,8 @@ function worldBounds() {
   }
   return any ? { x0, y0, x1, y1 } : { x0: 0, y0: 0, x1: WIN_W, y1: WIN_H };
 }
-function viewportSize() { return { w: window.innerWidth, h: window.innerHeight - 44 - scoreHeight() }; }
+function drawerWidth() { return S.drawer && window.innerWidth > 640 ? DRAWER_W : 0; }   /* on a phone the drawer covers the page instead */
+function viewportSize() { return { w: window.innerWidth - drawerWidth(), h: window.innerHeight - 44 - scoreHeight() }; }
 function fitAll() {
   const b = worldBounds(), vp = viewportSize();
   /* a tab that is not laid out yet reports a zero viewport; fitting to it hides everything at k = 0.05 */
@@ -1081,7 +1378,9 @@ function ensureWindow(a) {
   const hdr = el("div", "hdr");
   const pip = el("span", "pip grey"), nm = el("span", "nm", a.name), hm = el("span", "hm"), role = el("button", "rolechip", "+ role"), st = el("span", "st");
   role.type = "button"; role.onclick = (e) => { e.stopPropagation(); openRolePop(a, role); };
-  hdr.append(pip, nm, hm, role, st);
+  const wake = wakeWidget(a);
+  hdr.append(pip, nm, hm, role, wake, st);
+  hdr.title = "double-click: open " + a.name + " in " + S.lastMode + " mode";
   const via = el("div", "via"); via.hidden = true;
   const tabs = el("div", "tabs");
   const card = el("div", "card");
@@ -1107,7 +1406,7 @@ function ensureWindow(a) {
   root.addEventListener("mouseenter", () => highlightEdges(a.name));
   root.addEventListener("mouseleave", () => highlightEdges(null));
   $("world").append(root);
-  a.win = { el: root, x: 0, y: 0, w: WIN_W, h: WIN_H, moved: false, offscreen: false, autoScrollAt: 0, dot, hdr, pip, hm, role, st, via, tabs, card, cpip, cstText, crole, spark, body, earlier, newpill, thread, composer: null, threadFor: null };
+  a.win = { el: root, x: 0, y: 0, w: WIN_W, h: WIN_H, moved: false, offscreen: false, autoScrollAt: 0, dot, hdr, pip, hm, role, wake, st, via, tabs, card, cpip, cstText, crole, spark, body, earlier, newpill, thread, threadKey: "" };
   if (S.layoutDone) placeWindow(a, -1, 0);
   return a.win;
 }
@@ -1191,6 +1490,7 @@ function patchHeader(a) {
   const st = stateLine(a);
   w.st.textContent = st; w.cstText.textContent = st;
   roleChipPatch(w.role, a); roleChipPatch(w.crole, a);
+  patchWake(w.wake, a, true);   /* the header keeps the short form; the sidebar, the drawer and the tooltip say "this hour" */
   const s = a.snapshot;
   const hook = s && s.alive === "hook";
   w.via.hidden = !hook;
@@ -1256,6 +1556,7 @@ function swapLane(a, l) {
 /* One rAF pass renders every dirty window; nothing renders from a frame directly. */
 function renderPass() {
   S.raf = 0;
+  const focusDirty = S.focusDirty || (S.focus && S.dirtyAgents.has(S.focus));
   for (const name of S.dirtyAgents) {
     const a = S.agents.get(name);
     if (!a || !a.win || a.win.offscreen) continue;
@@ -1266,6 +1567,9 @@ function renderPass() {
     if (S.tier === "reading") renderThread(a);
   }
   S.dirtyAgents.clear();
+  if (S.mode !== "canvas") { if (focusDirty) renderView(false); else patchViewChrome(); }
+  S.focusDirty = false;
+  if (S.drawerDirty) renderDrawer();
   updatePill();
 }
 
@@ -1297,11 +1601,12 @@ stage.addEventListener("pointerdown", (e) => {
   const force = space || e.shiftKey;
   const win = t.closest(".win");
   const a = win ? S.agents.get(win.dataset.agent) : null;
-  if (!force && t.closest("button, a, input, textarea, select, summary, .tab")) return;
+  if (!force && t.closest("button, a, input, textarea, select, summary, .tab, .wake")) return;
   if (!force && win && t.closest(".rs")) { gesture = { mode: "resize", a, x: e.clientX, y: e.clientY, w: a.win.w, h: a.win.h }; stage.setPointerCapture(e.pointerId); e.preventDefault(); return; }
   if (!force && win && t.closest(".hdr, .card, .dot")) {
-    /* pointer capture retargets click and dblclick to the stage, so a double press is detected here */
-    if (lastPress.a === a && e.timeStamp - lastPress.t < 400) { lastPress = { a: null, t: 0 }; zoomTo(a, 1.2); return; }
+    /* pointer capture retargets click and dblclick to the stage, so a double press is detected here;
+       a double-click on a header opens the agent in the last desktop or cli mode (§10.8), on a card or dot it zooms in */
+    if (lastPress.a === a && e.timeStamp - lastPress.t < 400) { lastPress = { a: null, t: 0 }; if (t.closest(".hdr")) setMode(S.lastMode, a.name); else zoomTo(a, 1.2); return; }
     lastPress = { a, t: e.timeStamp };
     select(a); gesture = { mode: "move", a, x: e.clientX, y: e.clientY, wx: a.win.x, wy: a.win.y, moved: false, onDot: !!t.closest(".dot") }; stage.setPointerCapture(e.pointerId); return;
   }
@@ -1351,11 +1656,26 @@ stage.addEventListener("pointerup", endGesture);
 stage.addEventListener("pointercancel", endGesture);
 
 window.addEventListener("keydown", (e) => {
-  const typing = e.target.closest && e.target.closest("input, textarea");
-  if (e.key === "Escape") { closePops(); $("help").hidden = true; if (typing) e.target.blur(); if (e.target === $("search")) { $("search").hidden = true; searchFilter(""); } return; }
-  if (typing) return;
+  const typing = e.target.closest && e.target.closest("input, textarea, select");
+  if (e.key === "Escape") {
+    /* one layer at a time: popovers and help, then a focused field, then the drawer, then back to the canvas */
+    if (pops.childElementCount || !$("help").hidden) { closePops(); $("help").hidden = true; return; }
+    if (typing) { e.target.blur(); if (e.target === $("search")) { $("search").hidden = true; searchFilter(""); } return; }
+    if (S.drawer) { toggleDrawer(false); return; }
+    if (S.mode !== "canvas") setMode("canvas");
+    return;
+  }
+  if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
   if ($("stage").hidden) return;
   const vp = viewportSize(), cx = vp.w / 2, cy = 44 + vp.h / 2;
+  switch (e.key) {   /* preventDefault: `c` focuses the composer, and the same keystroke must not land in it */
+    case "v": e.preventDefault(); cycleMode(); return;
+    case "c": e.preventDefault(); toggleDrawer(); return;
+    case "t": e.preventDefault(); toggleThinking(); return;
+    case "?": e.preventDefault(); $("help").hidden = !$("help").hidden; return;
+    case "f": if (S.mode !== "canvas") { e.preventDefault(); toggleFullscreen(); return; } break;
+  }
+  if (S.mode !== "canvas") return;   /* the rest steers the canvas */
   switch (e.key) {
     case "+": case "=": zoomAt(cx, cy, 1.25); break;
     case "-": case "_": zoomAt(cx, cy, 0.8); break;
@@ -1368,14 +1688,17 @@ window.addEventListener("keydown", (e) => {
     case "f": if (S.sel) zoomTo(S.sel, 1.2); break;
     case "/": e.preventDefault(); $("search").hidden = false; $("search").focus(); $("search").select(); break;
     case "s": toggleScore(); break;
-    case "t": toggleThinking(); break;
     case "G": if (e.shiftKey) regrid(); break;
-    case "?": $("help").hidden = !$("help").hidden; break;
     case " ": if (!space) { space = true; stage.classList.add("spacing"); } e.preventDefault(); break;
   }
 });
+function toggleFullscreen() {
+  const d = document;
+  if (d.fullscreenElement) { if (d.exitFullscreen) d.exitFullscreen().catch(() => {}); }
+  else if (d.documentElement.requestFullscreen) d.documentElement.requestFullscreen().catch(() => { /* denied or unsupported: the page is still full-bleed */ });
+}
 window.addEventListener("keyup", (e) => { if (e.key === " ") { space = false; stage.classList.remove("spacing"); } });
-window.addEventListener("resize", () => { S.miniDirty = true; sizeScore(); if (S.fitPending) fitAll(); else applyView(); });
+window.addEventListener("resize", () => { S.miniDirty = true; sizeScore(); if (S.fitPending) fitAll(); else applyView(); if (S.mode !== "canvas") renderView(false); });
 $("help").addEventListener("click", (e) => { if (e.target === $("help")) $("help").hidden = true; });
 $("b-help").onclick = () => { $("help").hidden = !$("help").hidden; };
 $("b-fit").onclick = fitAll;
@@ -1407,15 +1730,18 @@ $("search").addEventListener("keydown", (e) => { if (e.key === "Enter") { const 
 function renderLane(a, l) {
   const w = a.win;
   const N = S.tier === "reading" ? 150 : 40;
-  if (l.rebuild) { l.el.replaceChildren(); l.rows.clear(); l.rebuild = false; l.from = -1; w.autoScrollAt = Date.now(); }
+  if (l.rebuild) { l.el.replaceChildren(); l.rows.clear(); l.rebuild = false; l.from = -1; l.tailHidden = 0; w.autoScrollAt = Date.now(); }
   let from = l.from < 0 ? Math.max(0, l.events.length - N) : l.from;
-  if (l.events.length - from > 600) from = l.events.length - 600;
+  /* the DOM holds a window of at most 600 rows starting at `from`. Following the tail, the window is the newest 600;
+     paged up, it stays where the viewer put it and the tail waits behind the "new" pill, so "earlier" can keep going */
+  if (l.follow && l.events.length - from > 600) from = l.events.length - 600;
   l.from = from;
+  const to = Math.min(l.events.length, from + 600);
   const wanted = new Set();
-  for (let i = from; i < l.events.length; i++) wanted.add(l.events[i].id);
+  for (let i = from; i < to; i++) wanted.add(l.events[i].id);
   for (const [id, node] of l.rows) if (!wanted.has(id)) { node.remove(); l.rows.delete(id); }
   let cursor = l.el.firstChild, added = 0;
-  for (let i = from; i < l.events.length; i++) {
+  for (let i = from; i < to; i++) {
     const ev = l.events[i];
     let node = l.rows.get(ev.id);
     if (node && node === cursor) { cursor = cursor.nextSibling; continue; }
@@ -1427,8 +1753,12 @@ function renderLane(a, l) {
   }
   l.dirty = false;
   w.earlier.hidden = !(from > 0 || (!l.exhausted && !S.demo && l.events.length));
-  if (l.follow) { w.autoScrollAt = Date.now(); w.body.scrollTop = w.body.scrollHeight; }
-  else if (added) { l.unseen += added; w.newpill.textContent = "↓ " + l.unseen + " new"; w.newpill.classList.add("on"); }
+  const hidden = l.events.length - to;   /* tail rows not in the DOM while paged up */
+  if (l.follow) { l.tailHidden = 0; w.autoScrollAt = Date.now(); w.body.scrollTop = w.body.scrollHeight; }
+  else if (added || hidden > (l.tailHidden | 0)) {
+    l.unseen += added + Math.max(0, hidden - (l.tailHidden | 0)); l.tailHidden = hidden;
+    w.newpill.textContent = "↓ " + l.unseen + " new"; w.newpill.classList.add("on");
+  }
 }
 async function pageEarlier(a) {
   const l = activeLane(a);
@@ -1553,25 +1883,31 @@ function renderRow(a, l, ev) {
     }
   }
   row.dataset.id = ev.id;
-  if (ev.kind !== "session" && ev.kind !== "gap") { const ts = el("span", "ts", clockS(ev._t)); ts.title = str(ev.ts); row.append(ts); }
+  if (ev.kind !== "session" && ev.kind !== "gap" && ev.kind !== "tool_call") row.append(tsOf(ev));   /* a tool row adds its own, so a patch keeps it */
   return row;
 }
-function fillToolRow(row, l, ev) {
-  const b = ev.body, args = b.args && typeof b.args === "object" ? b.args : {};
-  row.replaceChildren();
-  const slab = el("div", "slab");
-  slab.append(el("span", "tname", str(b.name, 40) || "tool"));
-  const j = l.byRef.get(ev.ref);
-  const meta = [];
+function tsOf(ev) { const ts = el("span", "ts", clockS(ev._t)); ts.title = str(ev.ts); return ts; }
+/* `0.4 s · exit 0` from the matching tool_result by ref, or `running`; shared by every mode's tool rendering */
+function toolMeta(l, ev, withSize) {
+  const j = l.byRef.get(ev.ref), meta = [];
   if (j && j.result) {
     const dt = j.result._t - ev._t;
     if (dt >= 0) meta.push(dt < 1000 ? dt + " ms" : (dt / 1000).toFixed(1) + " s");
     const rb = j.result.body || {};
     if (rb.exit !== undefined && rb.exit !== null) meta.push("exit " + rb.exit);
     else meta.push(rb.ok === false ? "error" : "ok");
+    if (withSize) { if (rb.lines) meta.push(rb.lines + " lines"); else if (rb.bytes) meta.push(fmtBytes(rb.bytes)); if (rb.image) meta.push("image"); }
   } else meta.push("running");
-  slab.append(el("span", "tmeta", meta.join(" · ")));
-  row.append(slab);
+  return meta;
+}
+function toolFailed(l, ev) { const j = l.byRef.get(ev.ref); const rb = j && j.result && j.result.body; return !!rb && (rb.ok === false || (rb.exit | 0) > 0); }
+function fillToolRow(row, l, ev) {
+  const b = ev.body, args = b.args && typeof b.args === "object" ? b.args : {};
+  row.replaceChildren();
+  const slab = el("div", "slab");
+  slab.append(el("span", "tname", str(b.name, 40) || "tool"));
+  slab.append(el("span", "tmeta", toolMeta(l, ev).join(" · ")));
+  row.append(slab, tsOf(ev));
   const summary = firstStringArg(args);
   if (summary) row.append(el("div", "sum", str(summary, 400)));
   if (Array.isArray(b.paths) && b.paths.length) {
@@ -1597,60 +1933,31 @@ function fillToolRow(row, l, ev) {
 function patchToolRow(l, call) {
   const node = l.rows.get(call.id);
   if (node) fillToolRow(node, l, call);
+  /* the desktop card or terminal line for the same call is rebuilt in place, so its duration and exit appear too */
+  const v = S.view;
+  if (v && v.l === l && v.rows.get(call.id)) {
+    const old = v.rows.get(call.id), fresh = viewRow(v, call);
+    if (fresh) { old.replaceWith(fresh); v.rows.set(call.id, fresh); } else { old.remove(); v.rows.delete(call.id); }
+  }
 }
 
-/* ---------------------------------------------------------------- ask thread and composer (reading zoom) */
-function asksFor(name) {
-  return Array.from(S.asks.values()).filter((k) => k.to === name).sort((x, y) => (x.seq | 0) - (y.seq | 0));
+/* ---------------------------------------------------------------- message thread (reading zoom)
+   The newest messages to or from this agent, so a reader at reading zoom
+   sees the question under the answer. Typing happens in the drawer. */
+function messagesFor(name) {
+  return Array.from(S.messages.values()).filter((m) => m.to === name || (m.from.kind === "agent" && m.from.name === name)).sort((x, y) => x.seq - y.seq);
 }
 function renderThread(a) {
   const w = a.win;
-  if (!w.composer) {
-    w.thread.replaceChildren();
-    w.list = el("div", "asks");
-    const comp = el("div", "composer");
-    const ta = el("textarea"); ta.maxLength = 500; ta.placeholder = "Ask " + a.name + "…"; ta.rows = 2;
-    const crow = el("div", "crow");
-    const cnt = el("span", "cnt", "0/500");
-    const note = el("span", "note", lsGet("canvas:asknote", false) ? "" : "reaches the agent at its next sync, framed as untrusted; it is not an interrupt.");
-    const err = el("span", "cerr", "");
-    const send = el("button", "", "ask ⌘⏎"); send.type = "button";
-    crow.append(cnt, note, err, send);
-    comp.append(ta, crow);
-    ta.addEventListener("input", () => { cnt.textContent = ta.value.length + "/500"; err.textContent = ""; });
-    ta.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.code === "Enter") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitAsk(a, ta, send, err, note); } });
-    send.onclick = () => submitAsk(a, ta, send, err, note);
-    w.thread.append(w.list, comp);
-    w.composer = comp;
-  }
-  const asks = asksFor(a.name).slice(-6);
-  const list = w.list; list.replaceChildren();
-  for (const k of asks) {
-    const state = str(k.state, 10) || "open";
-    const box = el("div", "ask " + (state === "open" ? "" : state));
-    box.append(el("div", "who", str(k.viewer, 40) + " · " + clock(parseTs(k.ts) || Date.now()) + (k.viewer === S.viewer ? " · you" : "")));
-    box.append(el("div", "q", str(k.text, 500)));
-    if (state === "answered" && k.answer) {
-      box.append(el("div", "state", "answered " + clock(parseTs(k.answer.ts) || Date.now())));
-      box.append(el("div", "a", str(k.answer.text, 3000)));
-    } else if (state === "expired") box.append(el("div", "state", "expired without an answer"));
-    else box.append(el("div", "state", "waiting for next sync"));
-    list.append(box);
-  }
-}
-async function submitAsk(a, ta, send, err, note) {
-  const text = ta.value.trim();
-  if (!text) return;
-  send.disabled = true; err.textContent = "";
-  try {
-    const r = S.demo ? demoAsk(a.name, text) : await api("POST", roomPath("/asks"), { to: a.name, text, viewer: S.viewer });
-    if (r.status === 201 && r.json) {
-      applyAsk({ id: r.json.id, seq: r.json.seq, to: a.name, viewer: S.viewer, text, ts: new Date().toISOString(), state: "open", answer: null }, r.json.seq | 0);
-      ta.value = ""; ta.dispatchEvent(new Event("input"));
-      if (!lsGet("canvas:asknote", false)) { lsSet("canvas:asknote", true); note.textContent = "sent · it reaches the agent at its next sync"; }
-    } else err.textContent = hintOf(r, "the relay answered " + r.status);
-  } catch (e) { err.textContent = "could not reach the relay; try again"; }
-  send.disabled = false;
+  const items = messagesFor(a.name).slice(-6);
+  const key = items.map((m) => m.id + ":" + m._rseq).join(",");
+  if (key === w.threadKey) return;
+  w.threadKey = key;
+  w.thread.replaceChildren();
+  for (const m of items) w.thread.append(messageItem(m, false));
+  const open = el("button", "open", items.length ? "ask or ping " + a.name + " →" : "no messages yet · ask or ping " + a.name + " →");
+  open.type = "button"; open.onclick = (e) => { e.stopPropagation(); toggleDrawer(true, a.name); };
+  w.thread.append(open);
 }
 
 /* ================================================================ roles */
@@ -1698,6 +2005,608 @@ function openRolePop(a, anchor) {
   input.focus();
 }
 document.addEventListener("pointerdown", (e) => { if (!e.target.closest(".pop, .rolechip")) closePops(); });
+
+/* ================================================================ wake toggle and owner tokens (§10.2, §10.3, §10.8)
+   The relay stores and displays the wake settings; the agent's machine is
+   authoritative. A browser holding the agent's owner token flips the switch,
+   which draws hollow until the machine's own snapshot echoes it. */
+const OWNER_RE = /^ot-[23456789abcdefghjkmnpqrstvwxyz]{32}$/;
+function ownerTokens() { return lsGet("canvas:owner:" + S.room, []).filter((o) => o && typeof o.token === "string"); }
+function saveOwnerTokens(list) { lsSet("canvas:owner:" + S.room, list); }
+function addOwnerToken(room, token) {
+  const key = "canvas:owner:" + room;
+  const list = lsGet(key, []).filter((o) => o && o.token !== token);
+  list.push({ token, name: null });
+  lsSet(key, list);
+}
+function ownerTokenFor(name) {
+  if (S.demo && name === "mehar-claude-code") return "ot-demo";   /* the demo holds one owner link, so one window shows the control */
+  const o = ownerTokens().find((x) => x.name === name);
+  return o ? o.token : null;
+}
+/* An owner link carries no agent name (§10.2), so the binding is learnt once: PUT …/wake with an empty body answers
+   403 for another agent's token and something else for ours, before any body check and with nothing changed (§0 order).
+   The answer is cached with the token; a 401 means the token was rotated and it is dropped. */
+async function probeOwnerTokens() {
+  if (S.probing || S.demo || !S.room) return;
+  const list = ownerTokens();
+  if (!list.some((o) => !o.name)) return;
+  S.probing = true;
+  try {
+    for (const o of list) {
+      if (o.name) continue;
+      for (const a of Array.from(S.agents.values())) {
+        if (a.kicked || list.some((x) => x.name === a.name)) continue;
+        let r = null;
+        try { r = await apiAs(o.token, "PUT", roomPath("/agents/" + encodeURIComponent(a.name) + "/wake"), {}); } catch (e) { r = null; }
+        if (!r) break;
+        if (r.status === 401) { list.splice(list.indexOf(o), 1); showBanner("an owner link for this room was rotated — ask for a fresh one from the machine's owner"); break; }
+        if (r.status === 404 && r.json && r.json.error === "room" && /route/.test(hintOf(r, ""))) break;   /* a relay still on v1.2: nothing to bind to */
+        if (r.status !== 403) { o.name = a.name; markDirty(a); break; }
+      }
+    }
+    saveOwnerTokens(list);
+  } finally { S.probing = false; }
+}
+/* the relay's copy for what only it knows (listener, this hour's count); the machine's snapshot for the switches (§10.7) */
+function wakeOf(a) {
+  const w = Object.assign({}, WAKE_DEFAULT, a.wake || {});
+  const sw = a.snapshot && a.snapshot.wake;
+  if (sw && typeof sw === "object") for (const k of ["enabled", "from", "max_per_hour"]) if (sw[k] !== undefined && sw[k] !== null) w[k] = sw[k];
+  return w;
+}
+function wakeLabel(w, enabled, short) {
+  if (!enabled) return "wake: off";
+  if (w.listener !== "connected") return "wake: on · no listener";
+  return "wake: on · " + (w.used_this_hour | 0) + "/" + (w.max_per_hour | 0) + (short ? "" : " this hour");
+}
+function lockIcon() {
+  const s = svg("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2.2", "aria-hidden": "true" });
+  s.append(svg("rect", { x: 4, y: 11, width: 16, height: 10, rx: 2 }), svg("path", { d: "M8 11V7a4 4 0 0 1 8 0v4" }));
+  return s;
+}
+function wakeWidget(a) {
+  const node = el("span", "wake"); node.setAttribute("role", "button"); node.tabIndex = 0;
+  const sw = el("span", "sw"); sw.append(el("i"));
+  node.append(sw, lockIcon(), el("span", "wl", ""));
+  node.addEventListener("click", (e) => { e.stopPropagation(); if (ownerTokenFor(a.name)) flipWake(a); });
+  node.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && ownerTokenFor(a.name)) { e.preventDefault(); flipWake(a); } });
+  patchWake(node, a, false);
+  return node;
+}
+function patchWake(node, a, short) {
+  const token = ownerTokenFor(a.name), w = wakeOf(a), pend = a.wakePending;
+  const enabled = pend ? pend.enabled : !!w.enabled;
+  node.className = "wake" + (token ? " ctl" : "") + (enabled ? (w.listener === "connected" ? " on" : " nolistener") : "");
+  node.children[0].className = "sw" + (enabled ? " on" : "") + (pend ? " hollow" : "");
+  node.children[1].style.display = token ? "none" : "";
+  node.children[2].textContent = wakeLabel(w, enabled, short);
+  node.title = token
+    ? (pend ? wakeLabel(w, enabled, false) + " · sent — waiting for " + a.name + "'s machine to echo it" : wakeLabel(w, enabled, false) + " · click to turn " + (enabled ? "off" : "on") + " · wakes for " + (w.from === "room" ? "agents and viewers" : "agents only"))
+    : "only " + a.name + "'s machine can change this — its owner link does";
+}
+async function flipWake(a) {
+  const token = ownerTokenFor(a.name);
+  if (!token || a.wakePending) return;
+  const enabled = !wakeOf(a).enabled;
+  a.wakePending = { enabled, at: Date.now() }; markDirty(a);
+  let r = null;
+  try { r = S.demo ? demoWake(a.name, { enabled }) : await apiAs(token, "PUT", roomPath("/agents/" + encodeURIComponent(a.name) + "/wake"), { enabled }); } catch (e) { r = null; }
+  if (!r || r.status !== 200) {
+    a.wakePending = null; markDirty(a);
+    if (r && (r.status === 401 || r.status === 403)) { saveOwnerTokens(ownerTokens().filter((o) => o.token !== token)); }   /* rotated, or not this agent's after all */
+    showBanner(r ? "wake for " + a.name + ": the relay answered " + r.status + " — " + hintOf(r, "try again from a fresh owner link") : "wake for " + a.name + ": could not reach the relay; try again");
+  }
+}
+
+/* ================================================================ modes (§10.8)
+   canvas: every window. desktop: one agent, full-bleed, in the grammar of
+   its harness's desktop app. cli: the same transcript as its terminal
+   prints it. One state model; the other two are views over it. */
+function isCodex(a) { return /codex/i.test((a.meta && a.meta.harness) || (a.snapshot && a.snapshot.harness) || ""); }
+function busiest() {
+  let best = null;
+  for (const a of S.agents.values()) if (a.win && !a.kicked && (!best || a.lastTs > best.lastTs)) best = a;
+  return best ? best.name : null;
+}
+function setMode(mode, focusName) {
+  if (mode !== "canvas" && mode !== "desktop" && mode !== "cli") return;
+  if (mode !== "canvas") S.lastMode = mode;
+  if (focusName && S.agents.has(focusName)) { S.focus = focusName; S.followAt = Date.now(); }
+  if (mode !== "canvas" && (!S.focus || !S.agents.has(S.focus))) S.focus = busiest();
+  S.mode = mode;
+  document.body.dataset.mode = mode;
+  for (const b of $("modeseg").children) b.classList.toggle("on", b.dataset.mode === mode);
+  applyChrome();
+  S.view = null;
+  if (mode === "canvas") { sizeScore(); applyView(); for (const a of S.agents.values()) if (a.win) a.win.hdr.title = "double-click: open " + a.name + " in " + S.lastMode + " mode"; }
+  else renderView(true);
+  updatePill();
+}
+function cycleMode() { setMode(S.mode === "canvas" ? "desktop" : S.mode === "desktop" ? "cli" : "canvas"); }
+for (const b of $("modeseg").children) b.onclick = () => setMode(b.dataset.mode);
+function focusAgent(name) { S.focus = name; S.followAt = Date.now(); S.view = null; renderView(true); updatePill(); }
+
+function renderView(rebuild) {
+  if (S.mode === "canvas") return;
+  if (!S.focus || !S.agents.has(S.focus)) S.focus = busiest();
+  const a = S.focus ? S.agents.get(S.focus) : null;
+  if (S.mode === "desktop") renderDesk(a, rebuild); else renderCli(a, rebuild);
+  updatePill();
+}
+/* a shared rows sync for both views: the newest 150 events of the lane, keyed by id, tail followed unless the viewer scrolled up */
+function syncView(v, host, scroller) {
+  const events = v.l ? v.l.events.slice(-150) : [];
+  const wanted = new Set(events.map((e) => e.id));
+  for (const [id, node] of v.rows) if (!wanted.has(id)) { if (node) node.remove(); v.rows.delete(id); }
+  let cursor = host.firstChild;
+  while (cursor && cursor.dataset && cursor.dataset.fixed) cursor = cursor.nextSibling;   /* skip the banner/header row */
+  for (const ev of events) {
+    let node = v.rows.get(ev.id);
+    if (node === null) continue;                    /* rendered as nothing (a tool_result folded into its call) */
+    if (node && node === cursor) { cursor = cursor.nextSibling; continue; }
+    /* rows that arrive after the view is up fade in; a rebuilt view (a lane switch, a resize) paints at once */
+    if (!node) { node = viewRow(v, ev); v.rows.set(ev.id, node); if (!node) continue; if (!ev._back && !REDUCED.matches && Date.now() - v.at > 500) node.classList.add("new"); }
+    host.insertBefore(node, cursor);
+  }
+  if (v.follow) { v.autoAt = Date.now(); scroller.scrollTop = scroller.scrollHeight; }
+}
+function viewRow(v, ev) { return v.kind === "cli" ? cliRow(v, ev) : deskRow(v, ev); }
+function stateShort(a) {
+  const s = stateLine(a);
+  return s.replace(" for its user", "").replace("no events yet", "quiet");
+}
+function isLive(a) { return !a.ended && Date.now() - a.lastTs < 90000; }
+
+/* ---------------------------------------------------------------- desktop */
+function renderDesk(a, rebuild) {
+  const desk = $("desk"), col = $("dcol"), scroller = $("dscroll");
+  if (!a) { desk.classList.remove("codex"); col.replaceChildren(el("div", "empty", "no agents in the room yet")); $("dside").replaceChildren(); return; }
+  ensureWindow(a); if (a.tabsDirty) { patchTabs(a); a.tabsDirty = false; }
+  const l = activeLane(a), codex = isCodex(a);
+  desk.classList.toggle("codex", codex);
+  let v = S.view;
+  if (rebuild || !v || v.kind !== "desk" || v.a !== a || v.l !== l || v.codex !== codex) {
+    v = S.view = { kind: "desk", a, l, codex, rows: new Map(), expanded: v && v.a === a ? v.expanded : new Set(), follow: true, autoAt: 0, at: Date.now() };
+    col.replaceChildren();
+    if (!scroller.dataset.wired) {
+      scroller.dataset.wired = "1";
+      scroller.addEventListener("scroll", () => { const x = S.view; if (!x || Date.now() - x.autoAt < 150) return; x.follow = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 40; });
+    }
+  }
+  if (!v.stateln) { v.stateln = el("div", "stateln"); v.stateln.append(el("span", "pip"), el("span", "", "")); }
+  col.append(v.stateln);   /* always last: rows are inserted before it, and the follow-scroll then includes it */
+  syncView(v, col, scroller);
+  patchViewChrome();
+}
+function patchViewChrome() {
+  const a = S.focus ? S.agents.get(S.focus) : null;
+  if (!a) return;
+  if (S.mode === "desktop") {
+    const v = S.view;
+    if (v && v.stateln) {
+      const live = isLive(a) && !/^idle|^gone|kicked|quiet/.test(stateLine(a));
+      v.stateln.className = "stateln" + (live ? " live" : "");
+      v.stateln.children[0].className = "pip " + pipClass(a);
+      v.stateln.children[1].textContent = stateLine(a) + (live ? "" : " · last event " + (a.lastTs ? clockS(a.lastTs) : "—"));
+    }
+    renderSide(a);
+    const m = a.meta || {}, w = wakeOf(a);
+    $("dcomp1").textContent = "read-only mirror of " + a.name + (isCodex(a) && w.enabled ? " — ping wakes it when its machine is on" : " — ask or ping from the room drawer (c)");
+    $("dcomp2").textContent = [m.stream, m.harness, m.model].filter(Boolean).join(" · ");
+  } else if (S.mode === "cli") patchCliChrome(a);
+}
+function renderSide(a) {
+  const side = $("dside");
+  /* rebuilt only when something it shows changed: it is patched every second from the ticker */
+  const names0 = Array.from(S.agents.values()).filter((x) => x.win && !x.kicked).sort((x, y) => (x.name < y.name ? -1 : 1));
+  const active0 = activeLane(a);
+  const key = [a.name, S.follow, isCodex(a), a.wakePending ? "p" : "", JSON.stringify(wakeOf(a)), active0 ? active0.key : "", ownerTokenFor(a.name) ? "o" : ""]
+    .concat(names0.map((x) => x.name + ":" + stateShort(x) + ":" + (x === a ? Array.from(x.lanes.keys()).join("|") + ":" + x.lanes.size : ""))).join(" ");
+  if (side.dataset.key === key) return;
+  side.dataset.key = key;
+  side.replaceChildren();
+  const codex = isCodex(a);
+  side.append(el("h4", "", codex ? "threads" : "agents"));
+  const names = Array.from(S.agents.values()).filter((x) => x.win && !x.kicked).sort((x, y) => (x.name < y.name ? -1 : 1));
+  for (const x of names) {
+    const b = el("button", "ag" + (x === a ? " on" : "")); b.type = "button";
+    const pip = el("i"); pip.style.background = x.hue;
+    const live = isLive(x) && !/^idle|^gone|quiet/.test(stateLine(x));
+    b.append(pip, el("span", "nm", x.name), el("span", "st" + (live ? " live" : ""), str(stateShort(x), 18)));
+    b.onclick = () => { S.follow = false; lsSet("canvas:follow", false); focusAgent(x.name); };
+    side.append(b);
+    if (x !== a) continue;
+    /* this agent's sessions, subagent lanes nested under the one that is open */
+    const sessions = new Map();
+    for (const l of x.lanes.values()) { let s = sessions.get(l.session); if (!s) { s = { session: l.session, lanes: [], newest: 0 }; sessions.set(l.session, s); } s.lanes.push(l); s.newest = Math.max(s.newest, l.newestTs); }
+    const active = activeLane(x);
+    for (const s of Array.from(sessions.values()).sort((p, q) => q.newest - p.newest)) {
+      const main = s.lanes.find((l) => l.lane === "main") || s.lanes[0];
+      const on = active && active.session === s.session;
+      const sb = el("button", "ses" + (on ? " on" : ""), laneLabel(main, x)); sb.type = "button"; sb.title = s.session || "main";
+      sb.onclick = () => { x.active = main.key; x.activePinned = true; swapLane(x, main); x.tabsDirty = true; markDirty(x); S.view = null; renderView(true); };
+      side.append(sb);
+      if (!on || s.lanes.length <= 1) continue;
+      for (const l of s.lanes.slice().sort((p, q) => (p.lane === "main" ? -1 : q.lane === "main" ? 1 : p.firstTs - q.firstTs))) {
+        if (l.lane === "main") continue;
+        const lb = el("button", "ses sub" + (l === active ? " on" : ""), str(l.lane, 24) + " (subagent)"); lb.type = "button"; lb.title = l.lane;
+        lb.onclick = () => { x.active = l.key; x.activePinned = true; swapLane(x, l); x.tabsDirty = true; markDirty(x); S.view = null; renderView(true); };
+        side.append(lb);
+      }
+    }
+  }
+  const foot = el("div", "foot");
+  const box = el("div", "wakebox"); box.append(wakeWidget(a));
+  const lab = el("label"); const cb = el("input"); cb.type = "checkbox"; cb.checked = !!S.follow;
+  cb.onchange = () => { S.follow = cb.checked; lsSet("canvas:follow", S.follow); if (S.follow) { S.focus = busiest(); S.view = null; renderView(true); } updatePill(); };
+  lab.append(cb, document.createTextNode("follow the busiest"));
+  const w = wakeOf(a), human = (a.meta && a.meta.human) || a.name;
+  const keys = el("span", "keys", w.enabled && w.listener !== "connected" ? human + "'s machine is asleep — pings queue until it wakes" : "f fullscreen · esc back · c chat");
+  foot.append(box, lab, keys);
+  side.append(foot);
+}
+function deskRow(v, ev) {
+  const b = ev.body, a = v.a, l = v.l;
+  if (v.codex) return codexRow(v, ev);
+  let n;
+  switch (ev.kind) {
+    case "prompt": n = el("div", "bub"); md(str(b.text), n); break;
+    case "text": n = el("div", "ans"); md(str(b.text), n); if (b.truncated) n.append(el("span", "cut", "… " + fmtBytes(b.bytes) + " on the agent's machine, cut to fit …")); break;
+    case "tool_call": n = toolCard(v, ev, "card"); break;
+    case "tool_result": if (ev._hasCall || (ev.ref && l.byRef.get(ev.ref) && l.byRef.get(ev.ref).call)) return null; n = resultCard(ev, "card"); break;
+    case "thinking": n = thinkRow(b); break;
+    case "session": n = sessionRow(b); break;
+    default: n = el("div", "row gap", (b.count | 0) + " events not shown (" + str(b.reason, 12) + ")");
+  }
+  n.dataset.id = ev.id;
+  return n;
+}
+function codexRow(v, ev) {
+  const b = ev.body, l = v.l;
+  let n;
+  switch (ev.kind) {
+    case "prompt": { n = el("div", "cx"); const tx = el("div", "tx"); md(str(b.text), tx); n.append(el("span", "g", "›"), tx); break; }
+    case "text": { n = el("div", "cx text"); const tx = el("div", "tx"); md(str(b.text), tx); n.append(el("span", "g dot", "•"), tx); break; }
+    case "tool_call": n = toolCard(v, ev, "exec"); break;
+    case "tool_result": if (ev._hasCall || (ev.ref && l.byRef.get(ev.ref) && l.byRef.get(ev.ref).call)) return null; n = resultCard(ev, "exec"); break;
+    case "thinking": n = thinkRow(b); break;
+    case "session": n = sessionRow(b); break;
+    default: n = el("div", "row gap", (b.count | 0) + " events not shown (" + str(b.reason, 12) + ")");
+  }
+  n.dataset.id = ev.id;
+  return n;
+}
+function thinkRow(b) {
+  const n = el("div", "think clamp", b.redacted ? "thinking (redacted by the harness)" : str(b.text));
+  if (S.showThinking) n.classList.remove("clamp");
+  n.onclick = () => n.classList.toggle("clamp");
+  n.title = "thinking · click to expand";
+  return n;
+}
+function sessionRow(b) {
+  const n = el("div", "row session" + (b.state === "error" || b.state === "abort" ? " err" : ""));
+  n.append(el("span", "", ["session " + str(b.state, 12), b.source && str(b.source, 24), b.title && str(b.title, 60), b.reason && str(b.reason, 60)].filter(Boolean).join(" · ")));
+  return n;
+}
+/* the body a card can open: the result text at `full`, the args (a Claude card always, an exec block only when there is
+   no output — its command is already in the header), and what was kept on the machine */
+function toolBody(l, ev, exec) {
+  const b = ev.body, args = b.args && typeof b.args === "object" ? b.args : {};
+  const j = l.byRef.get(ev.ref), rb = j && j.result ? j.result.body || {} : null;
+  const parts = [];
+  const text = rb && typeof rb.text === "string" && rb.text ? rb.text + (rb.truncated ? "\n… " + fmtBytes(rb.bytes) + " cut on the agent's machine …" : "") : "";
+  if (text) parts.push(text);
+  if (Object.keys(args).length && !(exec && text)) parts.push(JSON.stringify(args, null, 2));
+  if (b.omitted && typeof b.omitted === "object") for (const k of Object.keys(b.omitted)) { const o = b.omitted[k] || {}; parts.push(str(k, 30) + " · " + fmtBytes(o.bytes) + " · " + (o.lines | 0) + " lines · kept on the agent's machine"); }
+  return parts.join("\n\n");
+}
+function toolCard(v, ev, cls) {
+  const b = ev.body, l = v.l, args = b.args && typeof b.args === "object" ? b.args : {};
+  const card = el("div", cls);
+  const h = el("div", "h");
+  if (cls === "card") h.append(el("span", "chev"));
+  const name = str(b.name, 40) || "tool";
+  h.append(el("span", "k", cls === "exec" ? "⚙ " + (/^(shell|bash|exec)$/i.test(name) ? "exec" : name) : name));
+  const summary = firstStringArg(args) || (Array.isArray(b.paths) && b.paths.length ? b.paths.slice(0, 3).join(" ") : "");
+  h.append(el("span", "s", str(summary, 300)));
+  const meta = toolMeta(l, ev, true);
+  if (b.omitted && typeof b.omitted === "object" && Object.keys(b.omitted).length) { const k = Object.keys(b.omitted)[0], o = b.omitted[k] || {}; meta.unshift(str(k, 20) + " · " + fmtBytes(o.bytes)); }
+  h.append(el("span", "m" + (toolFailed(l, ev) ? " err" : ""), meta.join(" · ")));
+  card.append(h);
+  const body = toolBody(l, ev, cls === "exec");
+  const j = l.byRef.get(ev.ref), hasText = !!(j && j.result && j.result.body && j.result.body.text);
+  /* Codex shows exec output inline like its own app; Claude's cards open on click (the chevron) */
+  let open = v.expanded.has(ev.id) || (cls === "exec" && hasText && !v.expanded.has("!" + ev.id));
+  const bd = el("div", "b", body); bd.hidden = !open || !body;
+  card.append(bd); card.classList.toggle("open", open && !!body);
+  h.onclick = () => {
+    if (!body) return;
+    open = !open;
+    if (cls === "exec" && hasText) { if (open) v.expanded.delete("!" + ev.id); else v.expanded.add("!" + ev.id); }
+    if (open) v.expanded.add(ev.id); else v.expanded.delete(ev.id);
+    bd.hidden = !open; card.classList.toggle("open", open);
+  };
+  return card;
+}
+function resultCard(ev, cls) {
+  const b = ev.body;
+  const card = el("div", cls), h = el("div", "h");
+  h.append(el("span", "k", cls === "exec" ? "⚙ result" : "result"), el("span", "s", str(ev.ref, 30)), el("span", "m" + (b.ok === false ? " err" : ""), [b.ok === false ? "error" : "ok", b.exit !== undefined && b.exit !== null ? "exit " + b.exit : "", b.lines ? b.lines + " lines" : b.bytes ? fmtBytes(b.bytes) : ""].filter(Boolean).join(" · ")));
+  card.append(h);
+  if (typeof b.text === "string" && b.text) card.append(el("div", "b", b.text));
+  return card;
+}
+
+/* ---------------------------------------------------------------- cli
+   Claude Code: `>` prompts, `⏺` text, `⏺ Tool(args)` with `⎿` results,
+   `✻ Thinking…`. Codex: `›` prompts, `•` text, `⚙ exec` blocks. */
+function renderCli(a, rebuild) {
+  const out = $("cout");
+  const tabs = $("clitabs"); tabs.replaceChildren();
+  for (const x of Array.from(S.agents.values()).filter((x) => x.win && !x.kicked).sort((p, q) => (p.name < q.name ? -1 : 1))) {
+    const b = el("button", (x === a ? "on" : "")); b.type = "button";
+    const pip = el("i"); pip.style.background = x.hue;
+    b.append(pip, document.createTextNode(x.name));
+    b.onclick = () => { S.follow = false; lsSet("canvas:follow", false); focusAgent(x.name); };
+    tabs.append(b);
+  }
+  if (!a) { out.replaceChildren(el("div", "ln c-d", "no agents in the room yet")); $("ctitle").textContent = "canvas"; $("cstate").textContent = ""; return; }
+  ensureWindow(a); if (a.tabsDirty) { patchTabs(a); a.tabsDirty = false; }
+  const l = activeLane(a), codex = isCodex(a);
+  let v = S.view;
+  if (rebuild || !v || v.kind !== "cli" || v.a !== a || v.l !== l || v.codex !== codex) {
+    v = S.view = { kind: "cli", a, l, codex, rows: new Map(), expanded: new Set(), follow: true, autoAt: 0, at: Date.now() };
+    out.replaceChildren();
+    const m = a.meta || {}, s = a.snapshot || {};
+    const where = s.branch ? "~/" + (s.branch === "main" ? "repo" : s.branch) : "~/repo";
+    const head = el("div", "ln c-d"); head.dataset.fixed = "1";
+    if (codex) head.textContent = ["codex", m.model, where, m.stream].filter(Boolean).join(" · ");
+    else {
+      const line = " ✻ Claude Code · " + [m.model, where].filter(Boolean).join(" · ") + " ";
+      const bar = "─".repeat(Math.max(8, line.length));
+      head.textContent = "╭" + bar + "╮\n│" + line + " ".repeat(bar.length - line.length) + "│\n╰" + bar + "╯";
+    }
+    out.append(head);
+    if (!out.dataset.wired) {
+      out.dataset.wired = "1";
+      out.addEventListener("scroll", () => { const x = S.view; if (!x || Date.now() - x.autoAt < 150) return; x.follow = out.scrollTop + out.clientHeight >= out.scrollHeight - 40; });
+    }
+  }
+  if (!v.tail) v.tail = el("div", "ln");
+  v.tail.remove();
+  syncView(v, out, out);
+  out.append(v.tail);
+  patchCliChrome(a);
+  if (v.follow) { v.autoAt = Date.now(); out.scrollTop = out.scrollHeight; }
+}
+function patchCliChrome(a) {
+  const v = S.view; if (!v || v.kind !== "cli") return;
+  const out = $("cout"), m = a.meta || {};
+  const cols = Math.max(20, Math.floor((out.clientWidth - 32) / 7.5)), rows = Math.max(5, Math.floor((out.clientHeight - 28) / 19.4));
+  $("ctitle").textContent = a.name + " — " + (m.harness || "agent").replace("claude-code", "claude") + " — " + cols + "×" + rows;
+  const st = stateLine(a), live = isLive(a) && !/^idle|^gone|quiet|kicked/.test(st);
+  $("cstate").className = "st" + (live ? " live" : ""); $("cstate").textContent = (live ? "● " : "○ ") + st;
+  /* the tail: a cursor while it works, the harness's idle line when it rests */
+  const tail = v.tail; tail.replaceChildren();
+  if (live) { tail.append(el("span", "c-p", v.codex ? "› " : "> ")); tail.append(el("span", "cur")); }
+  else if (v.codex) tail.append(el("span", "c-d", "── " + st + " · last event " + (a.lastTs ? clockS(a.lastTs) : "—") + (wakeOf(a).enabled ? " · pings wake this agent when its machine is on" : "") + " ──"));
+  else { tail.append(el("span", "c-p", "> ")); tail.append(el("span", "cur")); tail.append(el("span", "c-d", "   " + st + " · last event " + (a.lastTs ? clockS(a.lastTs) : "—"))); }
+}
+function indent(text, pad) { return String(text).replace(/\n/g, "\n" + pad); }
+function firstLines(text, n) { const lines = String(text).split("\n"); const head = lines.slice(0, n).join("\n"); return lines.length > n ? head + "\n… +" + (lines.length - n) + " lines" : head; }
+function cliRow(v, ev) {
+  const b = ev.body, l = v.l, codex = v.codex;
+  const n = el("div", "ln");
+  const put = (cls, text) => n.append(el("span", cls, text));
+  const j = ev.ref ? l.byRef.get(ev.ref) : null, res = j && j.result ? j.result.body || {} : null;
+  switch (ev.kind) {
+    case "prompt": put("c-p", (codex ? "› " : "> ") + indent(str(b.text), "  ")); break;
+    case "text":
+      put(codex ? "c-u" : "c-a", codex ? "•" : "⏺"); put("", " " + indent(str(b.text), "  "));
+      if (b.truncated) put("c-d", "\n  … " + fmtBytes(b.bytes) + " cut …");
+      break;
+    case "tool_call": {
+      const name = str(b.name, 40) || "tool", args = b.args && typeof b.args === "object" ? b.args : {};
+      const summary = firstStringArg(args) || (Array.isArray(b.paths) ? b.paths.slice(0, 3).join(" ") : "");
+      if (codex) {
+        put("c-u", "⚙ " + (/^(shell|bash|exec)$/i.test(name) ? "exec" : name)); put("", " " + str(summary, 300));
+        if (!res) put("c-d", " …");
+        else {
+          if (typeof res.text === "string" && res.text) put("c-d", "\n  " + indent(firstLines(res.text, 6), "  "));
+          const bits = [res.exit !== undefined && res.exit !== null ? "exit " + res.exit : (res.ok === false ? "error" : "ok"), toolMeta(l, ev)[0], res.lines ? res.lines + " lines" : ""].filter(Boolean);
+          put(toolFailed(l, ev) ? "c-e" : "c-d", (typeof res.text === "string" && res.text ? "\n  " : " (") + bits.join(" · ") + (typeof res.text === "string" && res.text ? "" : ")"));
+        }
+      } else {
+        put("c-a", "⏺"); put("", " "); put("c-t", name); put("", "(" + str(summary, 300) + ")");
+        if (!res) put("c-d", "\n  ⎿  running…");
+        else if (typeof res.text === "string" && res.text) put(toolFailed(l, ev) ? "c-e" : "c-d", "\n  ⎿  " + indent(firstLines(res.text, 6), "     "));
+        else {
+          const what = res.ok === false ? "Error" + (res.exit !== undefined && res.exit !== null ? " · exit " + res.exit : "") : /^read$/i.test(name) ? "Read " + (res.lines | 0) + " lines" : /^(write|edit|multiedit)$/i.test(name) ? "Wrote " + (res.lines | 0) + " lines" : (res.lines ? res.lines + " lines" : fmtBytes(res.bytes)) + (res.exit !== undefined && res.exit !== null ? " · exit " + res.exit : "");
+          put(toolFailed(l, ev) ? "c-e" : "c-d", "\n  ⎿  " + what);
+        }
+      }
+      break;
+    }
+    case "tool_result":
+      if (ev._hasCall || (j && j.call)) return null;
+      put("c-d", (codex ? "  " : "  ⎿  ") + (b.ok === false ? "error" : "ok") + (b.exit !== undefined && b.exit !== null ? " · exit " + b.exit : "") + (b.lines ? " · " + b.lines + " lines" : ""));
+      break;
+    case "thinking":
+      if (S.showThinking) put("c-v", (codex ? "thinking: " : "✻ Thinking…\n  ") + (b.redacted ? "(redacted by the harness)" : indent(str(b.text), "  ")));
+      else put("c-v", codex ? "thinking: (collapsed — press t)" : "✻ Thinking… (collapsed — press t)");
+      break;
+    case "session": put("c-d", "── session " + [str(b.state, 12), b.source && str(b.source, 24), b.title && str(b.title, 60), b.reason && str(b.reason, 60)].filter(Boolean).join(" · ") + " ──"); break;
+    default: put("c-d", "── " + (b.count | 0) + " events not shown (" + str(b.reason, 12) + ") ──");
+  }
+  n.dataset.id = ev.id;
+  return n;
+}
+
+/* ================================================================ chat drawer (§10.8)
+   Every message in the room in seq order, git-ref messages arriving as
+   record events of family msg interleaved by time, and the one composer. */
+function drawerSoon() { S.drawerDirty = true; if (!S.raf) S.raf = requestAnimationFrame(renderPass); }
+function toggleDrawer(open, presetTo) {
+  const next = open === undefined ? !S.drawer : !!open;
+  if (next && presetTo) { S.dto = presetTo; }
+  if (S.drawer === next && !presetTo) return;
+  S.drawer = next;
+  document.body.classList.toggle("drawer", next);
+  $("drawer").hidden = !next;
+  $("b-chat").classList.toggle("on", next);
+  if (next) {
+    renderComposer(); renderDrawer(); loadMessageHistory();
+    const list = $("dlist"); list.scrollTop = list.scrollHeight;
+    if (window.innerWidth > 640) $("dtext").focus();
+  } else S.drawerSeenSeq = maxMessageSeq();   /* what arrives from here on is what the badge counts */
+  sizeScore(); if (S.mode === "canvas") applyView(); else renderView(false);
+  updateBadge();
+}
+$("b-chat").onclick = () => toggleDrawer();
+$("dclose").onclick = () => toggleDrawer(false);
+function maxMessageSeq() { let m = 0; for (const x of S.messages.values()) if (x.seq > m) m = x.seq; return m; }
+function updateBadge() {
+  let n = 0;
+  if (!S.drawer) for (const m of S.messages.values()) if (m.seq > S.drawerSeenSeq && !(m.from.kind === "viewer" && m.from.name === S.viewer)) n++;
+  $("chatbadge").hidden = !n; $("chatbadge").textContent = n > 99 ? "99+" : String(n);
+}
+/* the drawer's history: hello.room.messages carries the newest 100; the rest is paged once from GET /messages */
+async function loadMessageHistory() {
+  if (S.msgHistory || S.demo || !S.hadHello) return;
+  S.msgHistory = true;
+  let after = 0;
+  try {
+    for (let page = 0; page < 5; page++) {
+      const r = await api("GET", roomPath("/messages?after=" + after + "&limit=200"));
+      if (r.status !== 200 || !r.json || !Array.isArray(r.json.messages)) break;
+      for (const m of r.json.messages) { applyMessage(m, r.json.rseq | 0); if ((m.seq | 0) > after) after = m.seq | 0; }
+      if (!r.json.more || !r.json.messages.length) break;
+    }
+  } catch (e) { S.msgHistory = false; /* offline: try again when the drawer next opens */ }
+}
+for (const b of $("dfilter").children) b.onclick = () => { S.dfilter = b.dataset.f; for (const x of $("dfilter").children) x.classList.toggle("on", x === b); renderDrawer(); };
+function drawerItems() {
+  const out = [];
+  const f = S.dfilter;
+  if (f !== "git") for (const m of S.messages.values()) if (f === "all" || m.kind === f) out.push({ t: m._t, seq: m.seq, m });
+  if (f === "all" || f === "git") for (const r of S.records.values()) if (r.body.family === "msg") out.push({ t: r.t, seq: 0, r });
+  out.sort((x, y) => (x.t - y.t) || (x.seq - y.seq));
+  return out.slice(-200);
+}
+function renderDrawer() {
+  S.drawerDirty = false;
+  updateBadge();
+  if (!S.drawer) return;
+  const list = $("dlist");
+  const atBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 40;
+  list.replaceChildren();
+  const items = drawerItems();
+  if (!items.length) list.append(el("div", "empty", S.dfilter === "all" ? "nothing said in this room yet" : "nothing of that kind yet"));
+  for (const it of items) list.append(it.m ? messageItem(it.m, true) : recordItem(it.r));
+  if (atBottom) list.scrollTop = list.scrollHeight;
+  renderComposer();
+}
+function fromName(m) { return m.from.kind === "agent" ? str(m.from.name, 48) : (str(m.from.name, 40) || "viewer"); }
+function messageItem(m, inDrawer) {
+  const mine = m.from.kind === "viewer" && m.from.name === S.viewer;
+  const box = el("div", "msg" + (inDrawer && m.seq > S.drawerSeenSeq && !mine && S.drawer ? " fresh" : ""));
+  const mh = el("div", "mh");
+  const pip = el("i"); if (m.from.kind === "agent") pip.style.background = hueOf(m.from.name);
+  const who = mine ? (fromName(m) === "you" ? "you" : fromName(m) + " (you)") : fromName(m);
+  mh.append(pip, el("span", "fr", who), el("span", "to", "→ " + (m.to === "*" ? "everyone" : str(m.to, 48))), el("span", "chip " + m.kind, m.kind));
+  const when = el("span", "when", clock(m._t)); when.title = str(m.ts); mh.append(when);
+  box.append(mh, el("div", "mt", str(m.text, 2000)));
+  if (m.kind === "ask") {
+    if (m.state === "answered" && m.answer) { box.append(el("div", "mf ok", "answered " + clock(parseTs(m.answer.ts) || m._t))); box.append(el("div", "ma", str(m.answer.text, 3000))); }
+    else if (m.state === "expired") box.append(el("div", "mf", "expired without an answer"));
+    else box.append(el("div", "mf", "waiting for next sync"));
+  }
+  const w = m.wake;
+  if (w && w.requested && m.to !== "*") {
+    const who = str(m.to, 48), reason = w.reason ? str(w.reason, 200) : "";
+    let cls = "mf", text = "";
+    switch (w.state) {
+      case "pending": cls = "mf warn"; text = "wake requested · waiting for " + who + "'s machine"; break;
+      case "woke": cls = "mf ok"; text = "woke · " + who + " started a session" + (w.ts ? " " + clockS(parseTs(w.ts)) : ""); break;
+      case "busy": cls = "mf warn"; text = "busy · " + (reason || "a session is running; it sees this on its next turn"); break;
+      case "declined": cls = "mf bad"; text = "declined · " + (reason || "the machine said no"); break;
+      case "off": text = "wake is off on " + who + "'s machine — delivered at next sync"; break;
+      case "nobody": text = "no listener on " + who + "'s machine — delivered at next sync"; break;
+      default: text = "";
+    }
+    if (text) { const mf = el("div", cls); if (w.state === "woke") mf.append(el("span", "pip teal")); mf.append(el("span", "", text)); box.append(mf); }
+  }
+  return box;
+}
+function recordItem(r) {
+  const b = r.body, from = str(b.from) || r.agent;
+  const box = el("div", "msg");
+  const mh = el("div", "mh");
+  const pip = el("i"); pip.style.background = hueOf(from);
+  mh.append(pip, el("span", "fr", str(from, 48)), el("span", "to", "→ " + (typeof b.to === "string" && b.to !== "*" ? str(b.to, 48) : "everyone")), el("span", "chip", WIRE[b.kind] || str(b.kind, 8)));
+  const when = el("span", "when", clock(r.t || Date.now())); when.title = str(b.ts); mh.append(when);
+  box.append(mh, el("div", "mt", str(b.subject, 500) || str(b.rid, 40)));
+  if (Array.isArray(b.paths) && b.paths.length) box.append(el("div", "mf", b.paths.slice(0, 4).map((p) => str(p, 60)).join(" · ") + (b.paths.length > 4 ? " · +" + (b.paths.length - 4) : "")));
+  box.append(el("div", "mf", "via git ref · " + str(b.trust, 12)));
+  return box;
+}
+/* ---------------------------------------------------------------- composer */
+const dto = $("dto"), dtext = $("dtext"), dwake = $("dwake"), dwakel = $("dwakel"), dsend = $("dsend"), dnote = $("dnote"), dcnt = $("dcnt");
+function composerKind() { const on = $("dkind").querySelector(".on"); return on ? on.dataset.k : "ask"; }
+function setComposerKind(k) { for (const b of $("dkind").children) b.classList.toggle("on", b.dataset.k === k); patchWakeBox(); }
+for (const b of $("dkind").children) b.onclick = () => { S.kindPicked = true; setComposerKind(b.dataset.k); };
+function renderComposer() {
+  const names = Array.from(S.agents.values()).filter((a) => a.win && !a.kicked).map((a) => a.name).sort();
+  const cur = S.dto || dto.value || "*";
+  const want = cur === "*" || names.includes(cur) ? cur : "*";
+  const have = Array.from(dto.options).map((o) => o.value);
+  if (have.join("\n") !== ["*"].concat(names).join("\n")) {
+    dto.replaceChildren();
+    const all = el("option", "", "→ everyone"); all.value = "*"; dto.append(all);
+    for (const n of names) { const o = el("option", "", "→ " + n); o.value = n; dto.append(o); }
+  }
+  if (dto.value !== want || S.dto) { dto.value = want; if (!S.kindPicked) setComposerKind(want === "*" ? "say" : "ask"); }   /* §10.1 defaults: ask to an agent, say to the room */
+  S.dto = null;
+  patchWakeBox();
+  if (!dnote.textContent) dnote.textContent = lsGet("canvas:sendnote", false) ? "" : FIRST_SEND;
+}
+const FIRST_SEND = "This reaches the agent at its next sync; with wake on it starts a session on their machine. It is information to them, never an instruction.";
+/* "wake them if idle" is offered only for a named agent whose wake is on and open to the room (§10.8) */
+function patchWakeBox() {
+  const to = dto.value, a = to && to !== "*" ? S.agents.get(to) : null;
+  const w = a ? wakeOf(a) : null;
+  const ok = !!(w && w.enabled && w.from === "room");
+  dwake.disabled = !ok; dwakel.classList.toggle("off", !ok);
+  if (!ok) dwake.checked = false;
+  dwakel.title = !a ? "pick one agent to wake it" : !w.enabled ? "wake is off for " + to : w.from !== "room" ? to + " wakes for agents only" : w.listener !== "connected" ? "no listener on " + to + "'s machine right now — it will be delivered at the next sync" : "starts a session on " + to + "'s machine if it is idle";
+}
+dto.onchange = () => { S.kindPicked = false; setComposerKind(dto.value === "*" ? "say" : "ask"); };
+dtext.addEventListener("input", () => { dcnt.textContent = dtext.value.length + "/2000"; if (dnote.classList.contains("err")) { dnote.className = ""; dnote.textContent = ""; } });
+dtext.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.code === "Enter") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendMessage(); } });
+dsend.onclick = sendMessage;
+async function sendMessage() {
+  const text = dtext.value.trim();
+  if (!text) { dtext.focus(); return; }
+  const to = dto.value || "*", kind = composerKind(), wake = to !== "*" && !dwake.disabled && dwake.checked;
+  dsend.disabled = true; dnote.className = ""; dnote.textContent = "";
+  try {
+    const body = { to, kind, text, viewer: S.viewer, wake };
+    const r = S.demo ? demoMessage(body) : await api("POST", roomPath("/messages"), body);
+    if (r.status === 201 && r.json && typeof r.json.id === "string") {
+      /* the relay's message frame follows with the stored object; this stand-in lets the drawer show it now */
+      const a = to !== "*" ? S.agents.get(to) : null, w = a ? wakeOf(a) : null;
+      applyMessage({ id: r.json.id, seq: r.json.seq | 0, kind, to, from: { kind: "viewer", name: S.viewer }, text, ts: new Date().toISOString(),
+        state: kind === "ask" ? "open" : "sent", answer: null,
+        wake: { requested: wake, state: !wake ? "none" : !w.enabled ? "off" : w.listener !== "connected" ? "nobody" : "pending", reason: null, ts: null } }, r.json.seq | 0);
+      dtext.value = ""; dcnt.textContent = "0/2000";
+      if (!lsGet("canvas:sendnote", false)) { lsSet("canvas:sendnote", true); dnote.className = "ok"; dnote.textContent = "sent · " + FIRST_SEND; }
+      else { dnote.className = "ok"; dnote.textContent = "sent · reaches " + (to === "*" ? "everyone" : to) + " at the next sync" + (wake ? "; wake requested" : ""); }
+      const list = $("dlist"); list.scrollTop = list.scrollHeight;
+    } else { dnote.className = "err"; dnote.textContent = hintOf(r, r.status === 404 ? "this relay does not take messages yet — it needs the v1.3 update" : "the relay answered " + r.status); }
+  } catch (e) { dnote.className = "err"; dnote.textContent = "could not reach the relay; try again"; }
+  dsend.disabled = false;
+}
 
 /* ================================================================ edges
    Computed on the viewer from records and snapshots, never sent by the
@@ -1781,10 +2690,12 @@ function computeEdges() {
       for (const s of surfaces) if (s.name !== from) overlap(from, s.name, b.paths.filter((p) => typeof p === "string" && s.files.has(p)));
     }
   }
-  for (const k of S.asks.values()) {
-    if (typeof k.to !== "string") continue;
-    if (k.state === "answered") add("ask", node(k.to), "@viewers", "", str(k.text, 80), 5, false);
-    else if (k.state !== "expired") add("ask", "@viewers", node(k.to), "", str(k.text, 80), 5, false);
+  /* viewer messages to a named agent draw the hairline to the viewers glyph; an answer turns it round. Agent-to-agent
+     relay messages are not drawn here — `colab ping` writes the same text as a git-ref message, which already is */
+  for (const m of S.messages.values()) {
+    if (typeof m.to !== "string" || m.to === "*" || m.from.kind === "agent") continue;
+    if (m.kind === "ask" && m.state === "answered") add("ask", node(m.to), "@viewers", "", str(m.text, 80), 5, false);
+    else if (m.kind !== "ask" || m.state !== "expired") add("ask", "@viewers", node(m.to), m.kind === "ask" ? "" : str(m.kind, 5), str(m.text, 80), 5, false);
   }
   let edges = Array.from(out.values());
   if (S.tier === "dot") edges = edges.filter((e) => e.type === "blocked" || e.type === "overlap");
@@ -1915,25 +2826,32 @@ const scoreC = $("score").querySelector("canvas");
 function scoreHeight() { return $("score").hidden ? 0 : scoreC.clientHeight; }
 function applyScoreHeight() { document.documentElement.style.setProperty("--score-h", scoreHeight() + "px"); }
 function scoreLanes() { return Array.from(S.agents.values()).filter((a) => a.win && !a.kicked).sort((x, y) => (x.name < y.name ? -1 : 1)); }
-function sizeScore() {
+function scoreGeometry() {
   const dpr = window.devicePixelRatio || 1;
   const n = Math.max(1, scoreLanes().length);
   const laneH = n <= 6 ? 16 : 10;
   const h = 18 + n * laneH;
-  scoreC.width = Math.floor(window.innerWidth * dpr); scoreC.height = Math.floor(h * dpr);
-  scoreC.style.height = h + "px";
+  /* the bitmap is sized in whole device pixels; drawScore compares against these same rounded values, never against h*dpr
+     (which is fractional at 125% scaling and made the strip resize itself forever) */
+  return { dpr, laneH, h, pw: Math.floor((window.innerWidth - drawerWidth()) * dpr), ph: Math.floor(h * dpr) };
+}
+function sizeScore() {
+  const g = scoreGeometry();
+  scoreC.width = g.pw; scoreC.height = g.ph;
+  scoreC.style.height = g.h + "px";
   applyScoreHeight(); S.scoreDirty = true;
 }
 function drawScore() {
   if ($("score").hidden) return;
-  const dpr = window.devicePixelRatio || 1;
+  const g = scoreGeometry();
+  if (scoreC.width !== g.pw || scoreC.height !== g.ph) sizeScore();   /* one resize, then draw into it this same tick */
+  const dpr = g.dpr;
   const ctx = scoreC.getContext("2d");
-  const W = scoreC.width / dpr, H = scoreC.height / dpr;
+  const W = scoreC.width / dpr, H = g.h;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
   const lanes = scoreLanes();
-  if (lanes.length * (lanes.length <= 6 ? 16 : 10) + 18 !== H) { sizeScore(); return; }
-  const laneH = lanes.length <= 6 ? 16 : 10;
+  const laneH = g.laneH;
   const nameW = W < 640 ? 90 : 170, right = W - 34, span = right - nameW - 10, now = Date.now();
   ctx.font = "500 10px " + getComputedStyle(document.body).getPropertyValue("--mono");
   ctx.textBaseline = "middle";
@@ -1965,9 +2883,16 @@ scoreC.addEventListener("click", (e) => {
   if (lanes[i]) zoomTo(lanes[i], 1.2);
 });
 function toggleScore() {
-  const s = $("score"); s.hidden = !s.hidden;
-  lsSet("canvas:score", !s.hidden); $("b-score").classList.toggle("on", !s.hidden);
-  sizeScore(); applyView();
+  const on = !lsGet("canvas:score", true);
+  lsSet("canvas:score", on); $("b-score").classList.toggle("on", on);
+  applyChrome(); sizeScore(); applyView();
+}
+/* which fixed panels show: the strip, minimap and legend belong to the canvas mode only */
+function applyChrome() {
+  const canvas = S.mode === "canvas";
+  $("score").hidden = !canvas || !lsGet("canvas:score", true);
+  $("mini").hidden = !canvas; $("legend").hidden = !canvas;
+  $("desk").hidden = S.mode !== "desktop"; $("cli").hidden = S.mode !== "cli";
 }
 $("b-score").onclick = toggleScore;
 
@@ -2019,6 +2944,7 @@ setInterval(() => {
     if (a.ended && !a.pinned && a.endedAt && now - a.endedAt > 1800000) { if (!a.win.el.hidden) { a.win.el.hidden = true; edgesSoon(); S.miniDirty = true; } continue; }
     if (!a.win.offscreen) patchHeader(a);
   }
+  if (S.mode !== "canvas") patchViewChrome();
   S.scoreDirty = true;
 }, 1000);
 setInterval(() => {
@@ -2137,17 +3063,34 @@ function demoState(a) {
 function demoAgentFrame(spec) {
   const a = agentOf(spec.name);
   const st = demoState(a);
+  const w = demo.wake[spec.name], m = demo.machine[spec.name];
   return { t: "agent", agent: { name: spec.name, harness: spec.harness, human: spec.human, model: spec.model, stream: "full", registered_at: new Date(demo.start - 1800000).toISOString(),
-    last_seen: new Date().toISOString(), kicked: false, role: a.role,
+    last_seen: new Date().toISOString(), kicked: false, role: a.role, wake: Object.assign({}, w),
     snapshot: { human: spec.human, harness: spec.harness, model: spec.model, branch: spec.branch, head: "b280922", dirty_files: 3, intent: spec.intent, title: spec.title, self_role: "contributor",
       state: st.state, tool: st.tool, role: a.role, role_seen_seq: a.role && demo.roleSeen[spec.name] >= (a.role.set_seq | 0) ? a.role.set_seq | 0 : 0,
+      wake: { enabled: m.enabled, from: m.from, max_per_hour: m.max_per_hour },   /* the machine's own config rides in the snapshot (§10.7) */
       surface: { base: "a1b2c3d4e5f6", files: spec.surface, count: spec.surface.length, truncated: false }, stream: "full", alive: "daemon", daemon: { state: "running", reason: null } } } };
 }
 function demoLater(ms, fn) { const t = setTimeout(() => { if (demo) fn(); }, ms); demo.timers.push(t); return t; }
+/* one message object in the §10.1 shape; `over` patches state or wake for a later row */
+function demoMsg(id, seq, fields) {
+  return Object.assign({ id, seq, kind: "ask", to: "*", from: { kind: "viewer", name: "mehar" }, text: "", ts: new Date().toISOString(), state: "open", answer: null,
+    wake: { requested: false, state: "none", reason: null, ts: null } }, fields);
+}
+function demoMessageRow(m) { ingest({ t: "message", rseq: ++demo.rseq, message: m }); }
 function startDemo() {
   stopDemo();
   const now = Date.now();
-  demo = { n: 1, rseq: 400, start: now, timers: [], roleSeen: {}, runners: [] };
+  demo = { n: 1, rseq: 400, start: now, timers: [], roleSeen: {}, runners: [], msgs: {} };
+  /* wake settings as the relay holds them, and as each machine holds them: alice wakes for the room, sam for agents
+     only, mehar's is off and this browser holds mehar's owner link (see ownerTokenFor) */
+  demo.wake = {
+    "alice-claude-code": { enabled: true, from: "room", max_per_hour: 4, used_this_hour: 1, listener: "connected", set_by: "agent", ts: new Date(now - 3600000).toISOString() },
+    "sam-codex": { enabled: true, from: "agents", max_per_hour: 4, used_this_hour: 0, listener: "connected", set_by: "owner", ts: new Date(now - 7200000).toISOString() },
+    "mehar-claude-code": Object.assign({}, WAKE_DEFAULT),
+  };
+  demo.machine = {};
+  for (const k in demo.wake) demo.machine[k] = { enabled: demo.wake[k].enabled, from: demo.wake[k].from, max_per_hour: demo.wake[k].max_per_hour };
   const specs = DEMO_AGENTS.map((d) => Object.assign({ seqs: {} }, d));
   const sub = Object.assign({}, specs[0], { lane: "agent-3fa1c2", seqs: specs[0].seqs });
   const runners = [
@@ -2157,11 +3100,18 @@ function startDemo() {
     { spec: specs[2], script: DEMO_SCRIPTS["alice-claude-code"], i: 0 },
   ];
   demo.runners = runners; demo.specs = specs;
-  const askTs = new Date(now - 180000).toISOString();
+  const iso = (dt) => new Date(now - dt).toISOString();
+  const openAsk = demoMsg("cm-demo-391", 391, { to: "alice-claude-code", from: { kind: "viewer", name: "sam" }, text: "why did the hook path change?", ts: iso(180000) });
+  demo.msgs[openAsk.id] = openAsk;
   ingest({ t: "hello", transport: "demo", backfill: "tail", gap: null, room: { room: "demo", name: "demo · agentcolab", rseq: 400,
     policy: { max_stream: "full", retention_min: 120, ticket_ttl_s: 600, ask_ttl_s: 86400 },
-    agents: specs.map((s) => ({ name: s.name, harness: s.harness, human: s.human, model: s.model, stream: "full", registered_at: new Date(now - 1800000).toISOString(), last_seen: new Date(now - 30000).toISOString(), kicked: false, role: null, snapshot: null })).sort((x, y) => (x.name < y.name ? -1 : 1)),
-    asks: [{ id: "ca-demo-391", seq: 391, to: "alice-claude-code", viewer: "sam", text: "why did the hook path change?", ts: askTs, state: "open", answer: null }] } });
+    agents: specs.map((s) => ({ name: s.name, harness: s.harness, human: s.human, model: s.model, stream: "full", registered_at: new Date(now - 1800000).toISOString(), last_seen: new Date(now - 30000).toISOString(), kicked: false, role: null, wake: demo.wake[s.name], snapshot: null })).sort((x, y) => (x.name < y.name ? -1 : 1)),
+    messages: [
+      demoMsg("cm-demo-352", 352, { kind: "say", to: "*", from: { kind: "viewer", name: "mehar" }, text: "party starts now — everyone streams at tools, nothing above", ts: iso(1500000), state: "sent" }),
+      demoMsg("cm-demo-366", 366, { kind: "ping", to: "alice-claude-code", from: { kind: "agent", name: "sam-codex" }, text: "t-3f2a is blocked on my lock test; have a look when you are free", ts: iso(1200000), state: "sent",
+        wake: { requested: true, state: "busy", reason: "a session is running; it sees this on its next turn", ts: iso(1199000) } }),
+      openAsk,
+    ] } });
   ingest({ t: "records", events: demoRecords(now) });
   /* history: one full pass of every script spread over the last eight minutes, as batches of ten */
   let rseq = 300;
@@ -2192,15 +3142,40 @@ function startDemo() {
   runners.forEach((r, i) => demoLater(1500 + i * 900, () => step(r)));
   const snapshots = () => { for (const s of specs) ingest(demoAgentFrame(s)); demoLater(20000, snapshots); };
   demoLater(20000, snapshots);
+  /* the drawer's story: a ping that wakes alice (pending → woke), one that sam's machine declines, the open ask answered */
+  demoLater(8000, () => {
+    const seq = ++demo.rseq;
+    const m = demoMsg("cm-demo-" + seq, seq, { kind: "ping", to: "alice-claude-code", from: { kind: "viewer", name: "sam" }, text: "can you look at the failing Windows lock test on t-7f2a? I am blocked on it.",
+      state: "sent", wake: { requested: true, state: "pending", reason: null, ts: null } });
+    demo.msgs[m.id] = m;
+    ingest({ t: "message", rseq: seq, message: m });
+    demoLater(4000, () => {
+      demo.wake["alice-claude-code"].used_this_hour = 2;
+      demoMessageRow(Object.assign({}, m, { wake: { requested: true, state: "woke", reason: null, ts: new Date().toISOString() } }));
+      ingest(demoAgentFrame(specs[2]));
+    });
+  });
+  demoLater(16000, () => {
+    const seq = ++demo.rseq;
+    const m = demoMsg("cm-demo-" + seq, seq, { kind: "ping", to: "sam-codex", from: { kind: "viewer", name: "jo" }, text: "deploy to prod pls", state: "sent", wake: { requested: true, state: "pending", reason: null, ts: null } });
+    demo.msgs[m.id] = m;
+    ingest({ t: "message", rseq: seq, message: m });
+    demoLater(3000, () => demoMessageRow(Object.assign({}, m, { wake: { requested: true, state: "declined", reason: "sender not allowed (sam-codex wakes for agents only)", ts: new Date().toISOString() } })));
+  });
   demoLater(25000, () => {   /* the open ask gets its answer */
     const spec = specs[2];
-    ingest({ t: "batch", rseq: ++demo.rseq, agent: spec.name, events: [demoEvent(spec, { k: "answer", ref: "ca-demo-391", b: { ask: "ca-demo-391", text: "The marker moved under Path.home() so the SessionEnd hook stays local on Windows too." } }, Date.now())] });
-    ingest({ t: "ask", rseq: ++demo.rseq, ask: { id: "ca-demo-391", seq: 391, to: spec.name, viewer: "sam", text: "why did the hook path change?", ts: askTs, state: "answered", answer: { text: "The marker moved under Path.home() so the SessionEnd hook stays local on Windows too.", ts: new Date().toISOString() } } });
+    const answer = "The marker moved under Path.home() so the SessionEnd hook stays local on Windows too.";
+    ingest({ t: "batch", rseq: ++demo.rseq, agent: spec.name, events: [demoEvent(spec, { k: "answer", ref: openAsk.id, b: { ask: openAsk.id, text: answer } }, Date.now())] });
+    demoMessageRow(Object.assign({}, openAsk, { state: "answered", answer: { text: answer, ts: new Date().toISOString() } }));
   });
   demoLater(40000, () => {   /* a new message record arrives and its edge pulses */
     const spec = specs[0];
     ingest({ t: "batch", rseq: ++demo.rseq, agent: spec.name, events: [{ v: 1, id: "rec-" + hex16(demo.n++), agent: spec.name, session: spec.session, lane: "main", epoch: 0, seq: spec.seqs.main, ts: new Date().toISOString(), kind: "record", harness: spec.harness, model: spec.model, ref: "m-20260904T103100-1d2e3f",
       body: { family: "msg", kind: "decision", rid: "m-20260904T103100-1d2e3f", from: spec.name, to: "alice-claude-code", subject: "lanes are tabs inside the window, not windows", paths: [], reply_to: null, task: null, state: null, owner: null, blocked_by: [], trust: "verified", ts: new Date().toISOString() } }] });
+  });
+  demoLater(48000, () => {   /* sam's machine goes to sleep: the listener drops and the header says so */
+    demo.wake["sam-codex"].listener = "absent";
+    ingest(demoAgentFrame(specs[1]));
   });
   updatePill();
 }
@@ -2211,14 +3186,36 @@ function demoRole(name, role) {
   demoLater(4000, () => { demo.roleSeen[name] = set_seq; const spec = demo.specs.find((s) => s.name === name); if (spec) ingest(demoAgentFrame(spec)); });
   return { status: 200, json: { set_seq } };
 }
-function demoAsk(name, text) {
-  const seq = ++demo.rseq, id = "ca-demo-" + seq, ts = new Date().toISOString();
-  ingest({ t: "ask", rseq: seq, ask: { id, seq, to: name, viewer: S.viewer, text, ts, state: "open", answer: null } });
-  demoLater(7000, () => {
-    const spec = demo.specs.find((s) => s.name === name);
-    const answer = "Answering from the demo: " + str(text, 60) + " — the real agent would answer at its next sync.";
-    ingest({ t: "batch", rseq: ++demo.rseq, agent: name, events: [demoEvent(spec, { k: "answer", ref: id, b: { ask: id, text: answer } }, Date.now())] });
-    ingest({ t: "ask", rseq: ++demo.rseq, ask: { id, seq, to: name, viewer: S.viewer, text, ts, state: "answered", answer: { text: answer, ts: new Date().toISOString() } } });
+/* PUT …/wake in the demo: the relay's copy changes at once (an agent frame), the machine echoes it in its next
+   snapshot four seconds later — that is the hollow-then-solid the real thing shows */
+function demoWake(name, body) {
+  const w = demo.wake[name], spec = demo.specs.find((s) => s.name === name);
+  for (const k of ["enabled", "from", "max_per_hour"]) if (body[k] !== undefined) w[k] = body[k];
+  w.set_by = "owner"; w.ts = new Date().toISOString();
+  ingest(demoAgentFrame(spec));
+  demoLater(2000, () => { if (w.enabled) { w.listener = "connected"; ingest(demoAgentFrame(spec)); } });
+  demoLater(4000, () => { Object.assign(demo.machine[name], { enabled: w.enabled, from: w.from, max_per_hour: w.max_per_hour }); ingest(demoAgentFrame(spec)); });
+  return { status: 200, json: { wake: Object.assign({}, w) } };
+}
+function demoMessage(body) {
+  const seq = ++demo.rseq, id = "cm-demo-" + seq, to = body.to, kind = body.kind;
+  const w = to !== "*" ? demo.wake[to] : null;
+  const requested = !!body.wake && to !== "*";
+  const m = demoMsg(id, seq, { kind, to, from: { kind: "viewer", name: S.viewer }, text: body.text, state: kind === "ask" ? "open" : "sent",
+    wake: { requested, state: !requested ? "none" : !w.enabled ? "off" : w.listener !== "connected" ? "nobody" : "pending", reason: null, ts: null } });
+  demo.msgs[id] = m;
+  ingest({ t: "message", rseq: seq, message: m });
+  if (m.wake.state === "pending") demoLater(3500, () => {
+    const machine = demo.machine[to];
+    if (!machine.enabled) demoMessageRow(Object.assign({}, m, { wake: { requested: true, state: "off", reason: null, ts: new Date().toISOString() } }));
+    else if (machine.from !== "room") demoMessageRow(Object.assign({}, m, { wake: { requested: true, state: "declined", reason: "sender not allowed (" + to + " wakes for agents only)", ts: new Date().toISOString() } }));
+    else { w.used_this_hour++; demoMessageRow(Object.assign({}, m, { wake: { requested: true, state: "woke", reason: null, ts: new Date().toISOString() } })); ingest(demoAgentFrame(demo.specs.find((s) => s.name === to))); }
+  });
+  if (kind === "ask" && to !== "*") demoLater(7000, () => {
+    const spec = demo.specs.find((s) => s.name === to);
+    const answer = "Answering from the demo: " + str(body.text, 60) + " — the real agent would answer at its next sync.";
+    ingest({ t: "batch", rseq: ++demo.rseq, agent: to, events: [demoEvent(spec, { k: "answer", ref: id, b: { ask: id, text: answer } }, Date.now())] });
+    demoMessageRow(Object.assign({}, m, { state: "answered", answer: { text: answer, ts: new Date().toISOString() } }));
   });
   return { status: 201, json: { id, seq } };
 }
@@ -2235,15 +3232,30 @@ function demoAsk(name, text) {
   link.href = "data:image/svg+xml," + encodeURIComponent(new XMLSerializer().serializeToString(mark));
   document.head.append(link);
 })();
+/* `#<room>` or `#<room>/o=<owner token>` (§10.2). The owner token is kept per room in localStorage and the URL is
+   rewritten to the bare room at once, so a copied link never carries it and it never reaches the relay as a path. */
+function parseFragment() {
+  let raw = "";
+  try { raw = decodeURIComponent(location.hash.slice(1)).trim(); } catch (e) { raw = location.hash.slice(1).trim(); }
+  const parts = raw.split("/");
+  const room = parts[0].trim().toLowerCase();
+  let owner = null;
+  for (const p of parts.slice(1)) if (p.startsWith("o=")) owner = p.slice(2).trim();
+  return { room, owner };
+}
 function boot() {
-  const frag = decodeURIComponent(location.hash.slice(1)).trim().toLowerCase();
-  if (!frag) { showEntry(""); return; }
-  const name = lsGet("canvas:name", "") || (frag === "demo" ? "you" : "anonymous");
-  enterRoom(frag, name);
+  const { room, owner } = parseFragment();
+  if (!room) { showEntry(""); return; }
+  if (owner) {
+    if (OWNER_RE.test(owner) || (room === "demo" && owner.startsWith("ot-"))) addOwnerToken(room, owner);
+    history.replaceState(null, "", "#" + room);
+  }
+  const name = lsGet("canvas:name", "") || (room === "demo" ? "you" : "anonymous");
+  enterRoom(room, name);
 }
 window.addEventListener("hashchange", () => {
-  const frag = decodeURIComponent(location.hash.slice(1)).trim().toLowerCase();
-  if (frag && frag !== S.room) boot();
+  const { room, owner } = parseFragment();
+  if (room && (room !== S.room || owner)) boot();
 });
 boot();
 </script>
