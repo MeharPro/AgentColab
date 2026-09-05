@@ -313,6 +313,7 @@ def sessionstart(payload: dict[str, Any]) -> int:
         _flush_notices(store)
         session.pull_chat(store, timeout=8)
         store.update_local(last_sync=iso())
+    _canvas_start(store, payload)
     return _brief(store, "SessionStart", str(payload.get("session_id") or "session"))
 
 
@@ -321,13 +322,33 @@ def userpromptsubmit(payload: dict[str, Any]) -> int:
     store = _store(payload)
     if store is None:
         return 0
-    session.refresh_if_stale(store)
     sess = str(payload.get("session_id") or "session")
+    # Before the network window, not after: `refresh_if_stale` can spend the
+    # whole hook budget, and a flush that the harness kills is a flush that
+    # never happens. It is bounded and it is a no-op unless the daemon died.
+    _canvas_flush(store, payload, sess, budget=1.5)
+    _canvas_start(store, payload, probe_only=True)
+    session.refresh_if_stale(store)
     signature = session.briefing_signature(store)
     local = store.local()
     briefed = dict(local.get("briefed") or {})
     if briefed.get(sess) == signature:
         return 0
+    if session.canvas_only_delta(briefed.get(sess), signature):
+        # A viewer typed a role or an ask. That is worth a re-brief, but a room
+        # code is held by anyone with the link, so it must not be able to spend
+        # the agent's whole coordination budget: canvas-only re-briefs draw on
+        # their own hourly line, and when it is gone they wait for the next
+        # ordinary change rather than firing every prompt.
+        if session.canvas_budget_left(store) <= 0:
+            briefed[sess] = signature
+            local["briefed"] = dict(list(briefed.items())[-8:])
+            store.save_local(local)
+            return 0
+        with contextlib.suppress(Exception):
+            role = session.canvas_role(store)
+            session.canvas_charge(store, records.estimate_tokens(
+                session.role_block(role) if role else "canvas ask"))
     if signature == "empty":
         # Nothing to say. Record that, so we do not recompute it every prompt.
         briefed[sess] = signature
@@ -346,6 +367,13 @@ def stop(payload: dict[str, Any]) -> int:
     store = _store(payload)
     if store is None:
         return 0
+    sess = str(payload.get("session_id") or "session")
+    with contextlib.suppress(Exception):
+        from . import canvas
+        canvas.write_idle_marker(store, sess)
+    # Ahead of the 120-second throttle: presence can wait two minutes, a card
+    # that says `working` while the agent is asleep cannot.
+    _canvas_flush(store, payload, sess, budget=3)
     last = parse_iso(store.local().get("last_push"))
     if last and (now() - last).total_seconds() < 120:
         return 0
@@ -356,6 +384,63 @@ def stop(payload: dict[str, Any]) -> int:
         session.pull_chat(store)
         store.update_local(last_sync=iso())
     return 0
+
+
+def sessionend(payload: dict[str, Any]) -> int:
+    """The session is over: tell the daemon so the card goes grey in a second.
+
+    No network, no publish. The daemon polls for this marker, emits one
+    `session{end}` and exits; without it the card sits `working` for the full
+    thirty-minute idle timeout.
+    """
+    store = _store(payload)
+    if store is None:
+        return 0
+    with contextlib.suppress(Exception):
+        from . import canvas
+        if canvas.is_on(store):
+            canvas.write_stop_marker(store, str(payload.get("session_id") or "session"))
+    return 0
+
+
+# ---------------------------------------------------------------- canvas
+#
+# Every canvas call from a hook obeys the same three rules: it is imported
+# inside the function (so `import hooks` never drags in the canvas), it is
+# wrapped so it cannot raise, and it is a no-op unless this machine has joined
+# a room. `pretooluse` calls none of them -- the hot path stays one cached
+# JSON read, which is the reason it is affordable at all.
+
+
+def _canvas_start(store: Store, payload: dict[str, Any], *, probe_only: bool = False) -> str:
+    """Make sure a tailer is streaming this session. Never waits on it."""
+    try:
+        from . import canvas
+        if not canvas.is_on(store):
+            return "off"
+        sid = str(payload.get("session_id") or "")
+        if not sid:
+            return "off"
+        if probe_only and canvas.tailer_alive(store, sid):
+            return "running"
+        transcript = payload.get("transcript_path") or None
+        return canvas.ensure_tailer(store, sid, transcript,
+                                    str(store.config().get("harness") or "") or None)
+    except Exception:
+        return "failed"
+
+
+def _canvas_flush(store: Store, payload: dict[str, Any], sess: str, *, budget: float) -> int:
+    """The bounded fallback: only when the daemon could not start."""
+    try:
+        from . import canvas
+        if not canvas.is_on(store):
+            return 0
+        return canvas.flush_if_orphaned(store, sess, payload.get("transcript_path") or None,
+                                        budget=budget,
+                                        harness=str(store.config().get("harness") or "") or None)
+    except Exception:
+        return 0
 
 
 def _flush_notices(store: Store) -> int:
@@ -407,6 +492,7 @@ def _brief(store: Store, event: str, sess: str) -> int:
 HANDLERS = {
     "pretooluse": pretooluse,
     "sessionstart": sessionstart,
+    "sessionend": sessionend,
     "userpromptsubmit": userpromptsubmit,
     "stop": stop,
 }
@@ -443,6 +529,12 @@ CLAUDE_HOOKS: dict[str, list[dict[str, Any]]] = {
     }],
     "Stop": [{
         "hooks": [{"type": "command", "command": RUNNER + "stop", "timeout": 25}],
+    }],
+    # Writes one marker file and returns. The canvas daemon is watching for it
+    # so a finished session stops reading as live; everything else here can
+    # wait for the next session.
+    "SessionEnd": [{
+        "hooks": [{"type": "command", "command": RUNNER + "sessionend", "timeout": 5}],
     }],
 }
 
@@ -574,6 +666,7 @@ def _install_claude(root: Path, force: bool) -> list[str]:
         out.append("  UserPromptSubmit  re-brief only when something changed")
         out.append("  PreToolUse        one warning when somebody else is in a file")
         out.append("  Stop              publish presence when the session goes idle")
+        out.append("  SessionEnd        tell the canvas the session is over")
         out.append("  mcpServers.colab    the tools, for any subagent too")
     else:
         out.append("Claude Code already wired")

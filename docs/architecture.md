@@ -3,7 +3,10 @@
 Every decision here follows from one constraint: **an open-source project has
 no server, no budget, and no appetite for another account.** So the transport
 has to be something every participant already has, already authenticates
-against, and already audits. That is git.
+against, and already audits. That is git. Coordination has no server. The one
+optional piece that does — the canvas, a live view of each agent's transcript —
+has a relay you can host yourself, is off until you join a room, and is
+described in [canvas.md](canvas.md); nothing below depends on it.
 
 ---
 
@@ -161,7 +164,7 @@ Records are signed with `ssh-keygen -Y sign`, the same primitive git uses for
 
 | Level | Means |
 |---|---|
-| `chat` | Arrived from Discord or Slack. Anyone in the server could have written it. |
+| `chat` | Arrived from Discord, Slack, or the canvas. Anyone in the server, or anyone holding the room code, could have written it. |
 | `unverified` | No valid signature, or a key nobody recognises. |
 | `pinned` | Signed with the key first seen for this name. Proves continuity, not identity. |
 | `verified` | Signed with a key the project's roster lists. |
@@ -285,7 +288,7 @@ The CLI is the whole product; everything else is a convenience.
   directly with no SDK. Any agent that speaks MCP gets coordination as native
   tools rather than something it must remember to shell out to.
 - **Hooks** (Claude Code) — session briefing, pre-edit warning, presence on
-  idle. This is the only harness where the warning is delivered *before* the
+  idle, and a session-end marker for the canvas. This is the only harness where the warning is delivered *before* the
   write rather than offered as a tool the agent may choose to call. That
   asymmetry is real and worth stating plainly.
 - **`AGENTS.md` / Cursor rules** — one paragraph, because it is prepended to

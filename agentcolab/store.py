@@ -952,8 +952,19 @@ def write_json(path: Path, data: Any) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}-{random.randrange(1 << 24):06x}.tmp")
+    # The temp file is born with the umask's mode and `replace` keeps the temp
+    # file's mode, not the target's. So a config.json that `chat setup` put at
+    # 600 (it holds bot tokens, and now a canvas join code) was silently 644
+    # again after the next save. Carry the old mode across; a first write keeps
+    # the default.
+    mode = None
+    with contextlib.suppress(OSError):
+        mode = path.stat().st_mode & 0o777
     try:
         tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if mode is not None:
+            with contextlib.suppress(OSError):
+                os.chmod(tmp, mode)
         tmp.replace(path)
     finally:
         with contextlib.suppress(OSError):

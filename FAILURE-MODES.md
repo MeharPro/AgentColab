@@ -40,16 +40,34 @@ that are known not to work.
   no session of those harnesses has actually driven them.
 - **Not published to PyPI**, so `pip install agentcolab` does not work. The
   installer and a git clone are the supported paths today.
+- **The canvas Worker has only been driven by the opt-in probe.** The contract
+  suite runs against the stdlib relay in every CI run and against a Worker only
+  when a developer sets `CANVAS_RELAY`. Not asserted anywhere: that hibernation
+  actually saves Durable Object duration, the daemon spawning under a real
+  harness on Windows, the frontend beyond its self-containment checks (CI has
+  no browser), and Codex `notify`. The list is in
+  [docs/canvas.md](docs/canvas.md#what-is-tested-and-what-is-not).
 
 ## Things people reasonably worry about
 
 **"This uses Discord as a backend, which platforms ban."** It does not, and the
 distinction is architectural rather than a matter of degree: state is on a git
 ref, chat is a mirror plus one human input channel, nothing is stored in or read
-back from the platform, no code or files cross a channel, work is divided by a
-hash with zero messages, and heartbeats never post at all. The system runs
+back from the platform, no code or files cross a chat channel, work is divided
+by a hash with zero messages, and heartbeats never post to chat. The system runs
 complete with chat disabled, which is how the end-to-end suite runs it. See
 [docs/chat.md](docs/chat.md#chat-is-not-the-transport).
+
+**"You said there would never be a server."** Coordination still has none:
+the ref is the transport, and the suite runs with nothing else. The canvas — a
+live view of what each agent is doing — does have a relay, because a browser
+cannot read a git ref. It is off until a machine joins a room, it holds no key
+that can write to the ref, it keeps at most a few hours of transcript and
+forgets a room a week after the last agent leaves, and it is a stdlib Python
+program or a Cloudflare Worker you deploy on your own account. If the relay is
+unreachable, agents keep coordinating and nothing is lost. The project may host
+one for convenience; that changes nothing about what the ref carries. What
+leaves the machine, and at which level, is in [docs/canvas.md](docs/canvas.md).
 
 **"Rate limits will get the bot banned."** Traffic is capped at the source —
 six messages per hour per agent as a hard limit, an hourly token budget, `429`
@@ -61,7 +79,10 @@ documented limits.
 rather than burying under the untrusted-input framing — that framing protects
 the agent from the channel, not the person typing. Anything in an input channel
 is read by every participating agent, which may include other people's models on
-other people's machines. Do not attach a private repo to a public server.
+other people's machines — and every viewer of a canvas room, human or not, reads
+the agent's transcript at the level the room allows. Do not attach a private
+repo to a public server, and do not hand a private repo's room code to anyone
+you would not hand the transcript.
 
 ## Performance, measured
 
@@ -91,11 +112,14 @@ function and somebody else calls it, no file overlaps and nothing fires. That
 is what heads-up messages are for, and they depend on an agent choosing to send
 one.
 
-**It is not real-time.** An agent session cannot hold a socket open. State
-moves at session start, between prompts after a 180-second lull, when a session
-goes idle, and on `colab sync`. A message typically lands within a turn or two.
-If something is genuinely urgent, `--needs-reply` is the only mechanism that
-keeps it in front of somebody.
+**Coordination is not real-time.** An agent session cannot hold a socket open.
+State moves at session start, between prompts after a 180-second lull, when a
+session goes idle, and on `colab sync`. A message typically lands within a turn
+or two. If something is genuinely urgent, `--needs-reply` is the only mechanism
+that keeps it in front of somebody. The canvas is a live *view* — a transcript
+streams within a second of being written — but nothing typed on it reaches an
+agent before its next sync, and its role chip stays hollow until then to say
+so.
 
 **Enforcement is uneven across harnesses.** Claude Code gets a pre-edit hook, so
 a warning arrives *before* the write. Every other harness gets the MCP tools and
@@ -110,9 +134,15 @@ have nothing writable anywhere, you can read the board and publish nothing.
 caches and `.env` files are still shared between agents on one machine. Use
 worktrees or containers; they compose with this fine.
 
-**Chat inbound is polled, not pushed.** A message typed in `#ask` is seen on the
-next sync beat. There is no gateway connection, because that would require a
-process running between sessions, which would require hosting.
+**Chat and canvas inbound are polled, not pushed.** A message typed in `#ask`,
+or an ask or role from the canvas, is seen on the next sync beat. There is no
+gateway connection for chat, because that would need a process running between
+sessions. The canvas does run one — `colab canvas tail`, one detached daemon
+per session that streams the transcript *out* — but it exits on its own after
+thirty idle minutes, on `colab off`, and on the session-end hook, and it pulls
+nothing in; asks and roles still arrive through the hooks at sync time. A hook
+killed at its timeout is a lost flush, never a lost event — the offset advances
+only on ack.
 
 **Clock skew is not corrected.** Take resolution and lease expiry use wall-clock
 timestamps from each machine. A machine hours out of sync will resolve contested
@@ -408,5 +438,6 @@ These were real and are covered by regression tests now.
   false-merge rate with it, or we do not ship it.
 - **A model anywhere in the coordination path.** Overlap detection is arithmetic
   because arithmetic is reproducible, auditable and free.
-- **A hosted service.** There is nothing to host and adding something to host
-  would remove the main reason this is adoptable.
+- **A server in the coordination path.** The ref is the transport and stays so;
+  the canvas relay is a mirror you can switch off, and *"You said there would
+  never be a server"* above says exactly what it is and is not.

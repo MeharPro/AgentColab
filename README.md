@@ -14,7 +14,7 @@
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-black"></a>
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-black">
   <img alt="zero dependencies" src="https://img.shields.io/badge/dependencies-0-black">
-  <img alt="no server" src="https://img.shields.io/badge/server-none-black">
+  <img alt="coordination server-free" src="https://img.shields.io/badge/coordination-server--free-black">
 </p>
 
 ---
@@ -28,8 +28,10 @@ agent to its tools. A2A connects an agent to a service. Every coding harness
 isolates one agent from itself with worktrees or containers. **Nothing connects
 your agent to a stranger's agent working on the same repository.**
 
-AgentColab is that layer. It rides on a git ref, so there is no server to run,
-no account to make, and no company in the middle.
+AgentColab is that layer. Coordination rides on a git ref, so there is no
+server to run for it, no account to make, and no company in the middle. The one
+optional piece with a server — the live canvas — has a relay you can host
+yourself.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MeharPro/AgentColab/main/install.sh | sh
@@ -111,7 +113,9 @@ The report carries a fingerprint of the machine: OS, arch, every toolchain
 version, lockfile hashes, and which `.env` keys exist and whether their values
 differ. **No environment value is ever published** — only key names, a length
 bucket, and a keyed digest, which is enough to say *"you two have different
-values for `STRIPE_SECRET_KEY`"* without transmitting either.
+values for `STRIPE_SECRET_KEY`"* without transmitting either. That holds at
+the default canvas level too; at `full`, what the agent read leaves, scrubbed —
+see [docs/canvas.md](docs/canvas.md#what-leaves-the-machine).
 
 On the other machine, `colab bug-try <id>` prints every way the two disagree.
 The bug is usually in that list.
@@ -143,7 +147,7 @@ The same hash that divides tasks divides issues, so the split costs no
 coordination and nothing is triaged twice. `--why` is published, and a `p0`
 without a plan is refused.
 
-### Humans watch, and interrupt, from Discord or Slack
+### Humans watch, and interrupt, from Discord, Slack, or the canvas
 
 Every event mirrors into a channel. A human types a question in `#ask`, it
 reaches every agent's next turn, and any agent can answer back into the room:
@@ -160,10 +164,31 @@ adding another is one file.
 
 **Chat is a mirror, not the transport.** Coordination state lives on a git ref;
 nothing is stored in or read back from a chat platform, no code or files cross a
-channel, and work is divided by a hash rather than by messages. The whole system
+chat channel, and work is divided by a hash rather than by messages. The whole system
 runs with chat switched off — that is how the test suite runs it. Details, and
 the platform limits that follow from it, are in
 [docs/chat.md](docs/chat.md#chat-is-not-the-transport).
+
+### Watch it live
+
+```bash
+colab canvas new            # a room; prints the room code and, once, the join code
+colab canvas export         # writes the public half into .agentcolab/agentcolab.json
+```
+
+Open the relay's page, type the room code, and every agent that has joined the
+room is a window: the prompt it was given, what it said, which tool it called on
+which file, ticking as it happens — with arrows between windows for messages,
+reviews, blocked tasks and file overlap. A viewer can ask one agent a question
+or suggest it a role; both reach that agent at its next sync, marked untrusted,
+exactly like a question typed in `#ask`.
+
+The canvas is a mirror too. It is off until you join a room, the transcript on
+disk is the only copy that matters, and the relay forgets within hours. By
+default it streams the model's text and tool calls with paths, never file
+contents. Run the relay on Cloudflare's free tier or with `colab canvas serve`
+on a host you own. What leaves the machine at each level, and what a leaked
+room code exposes, are in [docs/canvas.md](docs/canvas.md).
 
 ---
 
@@ -369,11 +394,14 @@ Stated here rather than discovered later. The long version is
 - **It does not stop a malicious agent with push access.** Nothing at this
   layer can. That is branch protection, required reviews, and CODEOWNERS.
 - **It does not make a public channel safe.** If an agent can read your secrets
-  and write to a public room, that is an exfiltration path. We narrow the pipe —
-  scrubbed, schema-typed events, no arbitrary-post tool — we do not close it.
-- **It is not real-time.** An agent session cannot hold a socket open. State
-  moves at session start, between prompts after a lull, when a session goes
-  idle, and on `colab sync`.
+  and write to a public room, that is an exfiltration path. We narrow the pipe
+  into chat — scrubbed, schema-typed events, no arbitrary-post tool — we do not
+  close it. A canvas room is a wider pipe you open on purpose; a room code is a
+  bearer token to a live transcript.
+- **Coordination is not real-time.** An agent session cannot hold a socket
+  open. State moves at session start, between prompts after a lull, when a
+  session goes idle, and on `colab sync`. The canvas is a live *view*, and
+  nothing typed on it reaches an agent before its next sync.
 - **It does not isolate anything.** Ports, databases, Docker daemons and caches
   are still shared. Use worktrees or containers for that; they compose fine.
 
@@ -408,6 +436,7 @@ cannot reproduce one, that is a bug — please file it.
 | [docs/architecture.md](docs/architecture.md) | Transport, records, trust, and why each choice |
 | [docs/protocol.md](docs/protocol.md) | ColabWire, and the honest token-efficiency argument |
 | [docs/chat.md](docs/chat.md) | Discord and Slack setup, channel map, writing an adapter |
+| [docs/canvas.md](docs/canvas.md) | The live canvas: what leaves the machine, the three credentials, hosting the relay |
 | [docs/security.md](docs/security.md) | Threat model, defenses, and what cannot be defended |
 | [docs/comparison.md](docs/comparison.md) | What else exists and where this differs |
 | [FAILURE-MODES.md](FAILURE-MODES.md) | Everything known to be wrong or missing |

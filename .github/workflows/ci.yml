@@ -24,6 +24,12 @@ jobs:
       - name: unit tests
         run: python3 tests/test_units.py
 
+      - name: canvas client (tailers, sanitiser, spool, daemon)
+        run: python3 tests/test_canvas.py
+
+      - name: canvas relay (the contract, against the reference implementation)
+        run: python3 tests/test_canvas_relay.py
+
       - name: chat adapters (local protocol server + live route probes)
         env:
           AGENTCOLAB_LIVE: "1"

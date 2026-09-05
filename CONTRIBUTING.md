@@ -37,10 +37,12 @@ tool, and reporting it is more valuable than the change you were making.
 ```bash
 python3 tests/test_units.py          # 39 assertions, no network, no git
 bash tests/test_e2e.sh               # 43 assertions, four agents, one repo
+python3 tests/test_canvas.py         # tailers, sanitising, daemon spawn, the relay contract
+python3 tests/test_canvas_relay.py   # the stdlib relay on its own
 python3 tests/check_stdlib_only.py   # zero-dependency guard
 ```
 
-All three run in CI on Linux and macOS across Python 3.9, 3.12 and 3.14, and the
+All of these run in CI on Linux and macOS across Python 3.9, 3.12 and 3.14, and the
 end-to-end suite runs a second time with SSH keys removed to prove signing
 degrades rather than fails.
 

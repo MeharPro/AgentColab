@@ -188,6 +188,22 @@ def cmd_join(store: Store, args: argparse.Namespace) -> int:
                                                or [d for d in project_config["chat"]
                                                    if d in chat.DRIVERS]))
 
+    # -- canvas ---------------------------------------------------------
+    # The public half is a relay URL and a room code; a project that commits a
+    # join code as well (private repos only -- it lets anyone who can read the
+    # repository stream as any name) gets its agents registered here, so a
+    # newcomer runs `colab join` and is already on the canvas.
+    canvas_project = dict(project_config.get("canvas") or {})
+    if canvas_project:
+        canvas_config = dict(config.get("canvas") or {})
+        for key in ("relay", "room", "max_stream"):
+            if canvas_project.get(key) and not canvas_config.get(key):
+                canvas_config[key] = str(canvas_project[key])
+        if canvas_project.get("join_code") and not canvas_config.get("token"):
+            canvas_config["join_code"] = str(canvas_project["join_code"])
+        if canvas_config:
+            config["canvas"] = canvas_config
+
     # -- write it down --------------------------------------------------
     config.update({
         "paused": False,
@@ -244,7 +260,54 @@ def cmd_join(store: Store, args: argparse.Namespace) -> int:
     if args.install:
         print()
         cmd_install(store, argparse.Namespace(target="auto", force=False))
+    _join_canvas(store)
     return 0
+
+
+def _join_canvas(store: Store) -> None:
+    """Finish the canvas half of `colab join`, when the project set one up.
+
+    A committed join code means the project wants everyone streaming, so this
+    registers and starts the tailer for the session running right now. A room
+    code alone is a pointer: it says where to watch and how to opt in.
+    """
+    with contextlib.suppress(Exception):
+        from . import canvas
+        cfg = canvas.canvas_config(store)
+        relay = str(cfg.get("relay") or canvas.DEFAULT_RELAY).rstrip("/")
+        if canvas.is_on(store):
+            started = canvas.ensure_tailers_for_cwd(store)
+            print()
+            print(f"canvas    {canvas.viewer_url(relay, str(cfg.get('room')))}"
+                  f"  ({len(started)} session(s) streaming)")
+            return
+        if not cfg.get("join_code"):
+            if cfg.get("room"):
+                print()
+                print(f"canvas    watch at {canvas.viewer_url(relay, str(cfg.get('room')))}")
+                print("          stream your own session with "
+                      "`colab canvas join <join code>`")
+            return
+        reg = canvas.register(relay, str(cfg["join_code"]), store.agent,
+                              harness=str(store.config().get("harness") or "") or None,
+                              human=str(store.config().get("github") or "") or None,
+                              model=str(store.config().get("model") or "") or None,
+                              stream=str(cfg.get("stream") or "tools"))
+        if not reg:
+            return
+        config = store.config()
+        block = dict(config.get("canvas") or {})
+        room = str(cfg["join_code"]).split(".", 1)[0]
+        block.update({"relay": relay, "room": room, "token": reg.get("token"),
+                      "name": store.agent,
+                      "stream": reg.get("effective_stream") or "tools"})
+        config["canvas"] = block
+        store.save_config(config)
+        started = canvas.ensure_tailers_for_cwd(store)
+        print()
+        print(f"canvas    {canvas.viewer_url(relay, room)}")
+        print(f"          streaming {block['stream']} from "
+              f"{len(started)} session(s) in this checkout")
 
 
 def _free_name(name: str, taken: set[str]) -> str:
@@ -315,6 +378,19 @@ def _detect_harness() -> str:
     return "unknown"
 
 
+def _canvas_keepalive(store: Store) -> None:
+    """Every `colab` command is a chance to (re)start the canvas tailer.
+
+    Claude Code gets this from its SessionStart hook. Codex has no hooks, so
+    the first `colab` command an agent runs is what starts its stream -- which
+    is why `status` and `sync`, the two every agent runs, call it.
+    """
+    with contextlib.suppress(Exception):
+        from . import canvas
+        if canvas.is_on(store):
+            canvas.ensure_tailers_for_cwd(store)
+
+
 # ================================================================ status
 
 
@@ -333,6 +409,7 @@ def cmd_status(store: Store, args: argparse.Namespace) -> int:
               f"`colab sync` to publish")
     print(f"colab · {store.project} · you are `{me}`"
           + ("" if store.push_url else "  (read-only: no writable remote)"))
+    _canvas_keepalive(store)
     print(f"     synced {ago(store.local().get('last_sync'))}"
           + ("  STALE — run `colab sync`" if store.stale() else ""))
     print()
@@ -380,7 +457,28 @@ def cmd_status(store: Store, args: argparse.Namespace) -> int:
                   f"{' CRITICAL' if claim.get('critical') else ''}")
     if not (mail or waiting or rooms or claims):
         print("inbox clear")
+    canvas_line = _canvas_status_line(store)
+    if canvas_line:
+        print()
+        print(canvas_line)
     return 0
+
+
+def _canvas_status_line(store: Store) -> str:
+    """One line for `colab status`: where to watch, and whether we are streaming."""
+    with contextlib.suppress(Exception):
+        from . import canvas
+        cfg = canvas.canvas_config(store)
+        if not canvas.is_on(store):
+            if cfg.get("room"):
+                return ("canvas: this project has a room — join it with "
+                        "`colab canvas join <join code>`")
+            return ""
+        live = sum(1 for row in canvas.daemon_states(store) if row.get("state") == "running")
+        where = canvas.viewer_url(str(cfg.get("relay")), str(cfg.get("room")))
+        return (f"canvas: {where}  ({cfg.get('stream') or 'tools'}, "
+                f"{live} session(s) streaming)")
+    return ""
 
 
 def cmd_sync(store: Store, args: argparse.Namespace) -> int:
@@ -393,6 +491,9 @@ def cmd_sync(store: Store, args: argparse.Namespace) -> int:
     # which a harness without hooks never fires.
     delivered = _flush_notices(store)
     got = session.pull_chat(store)
+    _canvas_keepalive(store)
+    with contextlib.suppress(Exception):
+        got += session.pull_inbox(store, timeout=3)
     session.write_heartbeat(store, intent=args.intent, publish=bool(store.push_url))
     ok, detail = (True, "")
     if store.push_url:
@@ -622,7 +723,7 @@ def cmd_reply(store: Store, args: argparse.Namespace) -> int:
         return 1
     # A chat question is answered in the room it was asked in, not on the git
     # ref — the human waiting for it is not reading git.
-    if str(target.get("source")) in chat.DRIVERS:
+    if str(target.get("source")) in chat.DRIVERS or str(target.get("source")) == "canvas":
         return cmd_answer(store, argparse.Namespace(
             id=args.id, text=args.text, channel=target.get("channel") or "ask"))
     return cmd_send(store, argparse.Namespace(
@@ -640,6 +741,15 @@ def cmd_answer(store: Store, args: argparse.Namespace) -> int:
         return 1
     text = " ".join(args.text) if isinstance(args.text, list) else str(args.text)
     text = _body(text)
+    # A canvas ask came from the web view, not from a chat room. Answering it
+    # into `#ask` would post a stranger's question and this agent's reply to
+    # Discord, and saying "answered in chat" when chat is off is a lie.
+    if str(target.get("source")) == "canvas":
+        from . import canvas
+        sent = canvas.answer(store, target, text)
+        session.mark_read(store, [str(target.get("id"))])
+        return _ok("answered on the canvas" if sent
+                   else "answer queued — it goes out on the next sync")
     session.mirror(store, "reply", f"answering {target.get('agent')}",
                    body=records.scrub(text)[:3000],
                    fields={"asked": str(target.get("subject"))[:120]},
@@ -1871,10 +1981,15 @@ def cmd_off(store: Store, args: argparse.Namespace) -> int:
     config = store.config()
     config["paused"] = True
     store.save_config(config)
-    from . import hooks
+    from . import canvas, hooks
+    stopped = 0
+    with contextlib.suppress(Exception):
+        stopped = canvas.stop_daemons(store)
     removed = hooks.uninstall(store)
     print("AgentColab is off on this machine.")
     print("  hooks     " + ("removed from " + ", ".join(removed) if removed else "none found"))
+    if stopped:
+        print(f"  canvas    {stopped} streaming daemon(s) stopped")
     print("  records   left on the shared ref (others still see your last state)")
     print("  restart   colab join")
     print()
@@ -1894,6 +2009,13 @@ def cmd_purge(store: Store, args: argparse.Namespace) -> int:
         eprint("     Other agents' records are untouched — you cannot delete theirs.")
         eprint("     Confirm with --yes")
         return 1
+    with contextlib.suppress(Exception):
+        from . import canvas
+        cfg = canvas.canvas_config(store)
+        canvas.stop_daemons(store)
+        if cfg.get("room") and cfg.get("token"):
+            canvas.leave(str(cfg.get("relay")), str(cfg.get("room")), str(cfg.get("token")),
+                         str(cfg.get("name") or store.agent))
     removed = 0
     if store.mine.is_dir():
         import shutil
@@ -2025,6 +2147,210 @@ def cmd_install(store: Store, args: argparse.Namespace) -> int:
 def cmd_mcp(store: Store, args: argparse.Namespace) -> int:
     from . import mcp
     return mcp.serve(store)
+
+
+
+
+# ================================================================ canvas
+
+
+def _canvas_store() -> Store | None:
+    """A Store, or None with the reason printed.
+
+    `canvas new` and `canvas serve` are the two verbs a person runs before this
+    machine has joined anything -- one to mint a room, one to host the relay --
+    so the canvas parser does its own store handling rather than taking the
+    global `needs_store` gate.
+    """
+    try:
+        store = Store()
+    except LinkError as exc:
+        eprint(f"colab: {exc}")
+        return None
+    if not store.initialised:
+        eprint("colab: this machine has not joined yet.")
+        eprint("     Run:  colab join")
+        return None
+    return store
+
+
+def _canvas_relay(args: argparse.Namespace, store: Store | None) -> str:
+    """--relay, then this machine's config, then the project's, then the default."""
+    from . import canvas
+    if getattr(args, "relay", None):
+        return str(args.relay).rstrip("/")
+    if store is not None:
+        cfg = canvas.canvas_config(store)
+        if cfg.get("relay"):
+            return str(cfg["relay"]).rstrip("/")
+    with contextlib.suppress(Exception):
+        project = canvas.project_canvas(Path.cwd())
+        if project.get("relay"):
+            return str(project["relay"]).rstrip("/")
+    return canvas.DEFAULT_RELAY
+
+
+def cmd_canvas(store: Store | None, args: argparse.Namespace) -> int:
+    from . import canvas
+    action = args.action or "status"
+
+    # ---- new: mint a room. Works before `colab join`.
+    if action == "new":
+        try:
+            store = Store()
+        except LinkError:
+            store = None
+        relay = _canvas_relay(args, store if store and store.initialised else None)
+        policy = {"max_stream": args.max_stream} if args.max_stream else None
+        name = args.name or (store.project if store else "room")
+        room = canvas.new_room(relay, name, policy)
+        if not room:
+            eprint(f"colab: could not reach the relay at {relay}")
+            eprint("     Check the URL, or run your own with `colab canvas serve`.")
+            return 1
+        code, join_code = str(room.get("room")), str(room.get("join_code"))
+        print("canvas room created")
+        print()
+        print(f"  watch      {canvas.viewer_url(relay, code)}")
+        print(f"  room code  {code}")
+        print(f"  join code  {join_code}")
+        print()
+        print("Share the room code with anyone who should watch. Share the join code")
+        print("with a teammate's machine — it lets an agent stream as any name.")
+        print()
+        print("Next:  colab canvas join " + join_code)
+        return 0
+
+    store = store or _canvas_store()
+    if store is None:
+        return 1
+    relay = _canvas_relay(args, store)
+    cfg = canvas.canvas_config(store)
+
+    # ---- join: register, save, and start streaming the session we are in now.
+    if action == "join":
+        words = list(getattr(args, "words", None) or [])
+        join_code = str((words[0] if words else "") or cfg.get("join_code") or "")
+        if not join_code:
+            eprint("colab: a join code is required — `colab canvas join <join code>`")
+            eprint("     Ask whoever ran `colab canvas new` for it.")
+            return 1
+        name = store.agent
+        reg = canvas.register(relay, join_code, name,
+                              harness=str(store.config().get("harness") or "") or None,
+                              human=str(store.config().get("github") or "") or None,
+                              model=str(store.config().get("model") or "") or None,
+                              stream=args.stream or "tools")
+        if not reg:
+            eprint(f"colab: the relay at {relay} refused the join code.")
+            eprint("     It may be wrong, or the room may have been deleted.")
+            return 1
+        room = join_code.split(".", 1)[0]
+        config = store.config()
+        block = dict(config.get("canvas") or {})
+        block.update({"relay": relay, "room": room, "join_code": join_code,
+                      "token": reg.get("token"), "name": name,
+                      "stream": reg.get("effective_stream") or args.stream or "tools"})
+        config["canvas"] = block
+        store.save_config(config)
+        canvas.clear_room_gone(store)
+        started = canvas.ensure_tailers_for_cwd(store)
+        print(f"joined the canvas room as {name}")
+        print(f"  watch    {canvas.viewer_url(relay, room)}")
+        print(f"  streams  {block['stream']}"
+              + ("" if block["stream"] == (args.stream or "tools")
+                 else f" (the room's ceiling; you asked for {args.stream})"))
+        if started:
+            print(f"  live     {len(started)} session(s) from this checkout")
+        else:
+            print("  live     no session found yet — the next one streams automatically")
+        return 0
+
+    if not canvas.is_on(store):
+        eprint("colab: this machine has not joined a canvas room.")
+        eprint("     Run:  colab canvas join <join code>")
+        return 1
+
+    # ---- the rest need a room.
+    if action == "role":
+        if args.clear:
+            text = None
+        else:
+            text = " ".join(getattr(args, "words", None) or [])
+            if not text.strip():
+                eprint("colab: say what the role is, or pass --clear")
+                return 1
+        ok = canvas.put_role(relay, str(cfg.get("room")), str(cfg.get("token")),
+                             str(cfg.get("name") or store.agent), text)
+        if not ok:
+            eprint("colab: the relay did not accept that role")
+            return 1
+        return _ok("role cleared" if text is None else f"role set: {records.one_line(text, 60)}")
+
+    if action == "pull":
+        found = session.pull_inbox(store, timeout=5)
+        return _ok(f"pulled {found} ask(s) and the current role"
+                   if found else "nothing new on the canvas")
+
+    if action == "tail":
+        if args.discover:
+            return canvas.tail_discover(store, once=args.once)
+        if not args.session:
+            started = canvas.ensure_tailers_for_cwd(store)
+            if not started:
+                eprint("colab: no live session found for this checkout.")
+                eprint("     Pass --session and --transcript, or --discover.")
+                return 1
+            return _ok(f"streaming {len(started)} session(s)")
+        return canvas.tail_loop(store, args.session, args.transcript, once=args.once,
+                                harness=args.harness)
+
+    if action == "ensure":
+        canvas.ensure_tailers_for_cwd(store)
+        return 0
+
+    if action == "off":
+        stopped = canvas.stop_daemons(store)
+        config = store.config()
+        config.pop("canvas", None)
+        store.save_config(config)
+        print("canvas off on this machine.")
+        print(f"  daemons   {stopped} stopped")
+        print("  room      still there for everyone else; rejoin with `colab canvas join`")
+        return 0
+
+    if action == "export":
+        block = {"relay": relay, "room": str(cfg.get("room"))}
+        if args.with_join_code:
+            block["join_code"] = str(cfg.get("join_code"))
+        print(json.dumps({"canvas": block}, indent=2))
+        if args.with_join_code:
+            eprint("")
+            eprint("colab: that join code lets anyone who can read this repository stream")
+            eprint("     as any agent name. Commit it only for a private repo you trust.")
+        return 0
+
+    # ---- status (the default)
+    health = canvas.healthz(relay)
+    print(f"canvas    {cfg.get('room')}")
+    print(f"  watch     {canvas.viewer_url(relay, str(cfg.get('room')))}")
+    print(f"  relay     {relay}" + ("" if health else "  (unreachable)"))
+    if health:
+        print(f"  transport {', '.join(health.get('transports') or [])}")
+    print(f"  streaming {cfg.get('stream') or 'tools'}  (as {cfg.get('name') or store.agent})")
+    states = canvas.daemon_states(store)
+    if states:
+        for row in states:
+            note = f"  ({row.get('reason')})" if row.get("reason") else ""
+            print(f"  session   {str(row.get('sid'))[:8]}  {row.get('state')}{note}")
+    else:
+        print("  session   no daemon running — start one with `colab canvas ensure`")
+    role = session.canvas_role(store)
+    if role:
+        print(f"  role      {records.one_line(role.get('role'), 60)} "
+              f"(from viewer {records.one_line(role.get('viewer'), 24)})")
+    print(f"  {session.canvas_budget_line(store)}")
+    return 0
 
 
 def cmd_hook(store: Store | None, args: argparse.Namespace) -> int:
@@ -2272,6 +2598,35 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("mcp", help="run as an MCP server (any agent can use the tools)")
     p.set_defaults(func=cmd_mcp)
 
+    p = sub.add_parser("canvas", help="the live web view of every agent in a room")
+    p.add_argument("action", nargs="?", default="status",
+                   choices=["new", "join", "serve", "tail", "role", "status",
+                            "off", "export", "ensure", "pull"],
+                   help="new: mint a room · join: stream from this machine · "
+                        "serve: run your own relay · status: where things stand")
+    # One free-form word list rather than a positional per verb: `join` takes a
+    # code, `role` takes a sentence, `ensure` is handed a JSON blob by Codex's
+    # `notify` and must ignore it rather than exit 2 on every turn.
+    p.add_argument("words", nargs="*", help="the join code (join) or the role text (role)")
+    p.add_argument("--relay", help="relay base URL (default: the project's, then the built-in one)")
+    p.add_argument("--name", help="what to call the room, for `new`")
+    p.add_argument("--max-stream", dest="max_stream",
+                   choices=["summary", "tools", "full"],
+                   help="the room's ceiling, for `new`. Nobody may stream above it.")
+    p.add_argument("--stream", choices=["summary", "tools", "full"],
+                   help="what this machine sends (default tools: text and paths, "
+                        "never file contents)")
+    p.add_argument("--clear", action="store_true", help="clear the role")
+    p.add_argument("--with-join-code", dest="with_join_code", action="store_true",
+                   help="include the join code in `export` — anyone who can read the "
+                        "repository can then stream as any agent")
+    p.add_argument("--session", help="session id, for `tail`")
+    p.add_argument("--transcript", help="transcript path, for `tail`")
+    p.add_argument("--harness", help="which harness wrote the transcript, for `tail`")
+    p.add_argument("--discover", action="store_true", help="tail every live session here")
+    p.add_argument("--once", action="store_true", help="one pass, then exit")
+    p.set_defaults(func=cmd_canvas, needs_store=False)
+
     p = sub.add_parser("hook", help="internal: called by harness hooks")
     p.add_argument("event")
     p.set_defaults(func=cmd_hook, needs_store=False)
@@ -2369,6 +2724,14 @@ def main(argv: list[str] | None = None) -> int:
     if "--" in argv:
         cut = argv.index("--")
         argv, trailing = argv[:cut], argv[cut + 1:]
+    # `colab canvas serve --port 0 --state DIR` hands every remaining argument to
+    # the relay, which has its own flags and needs no repository. Intercepted
+    # before argparse rather than modelled as REMAINDER, which ate the flags of
+    # every other canvas verb.
+    if argv[:2] == ["canvas", "serve"]:
+        from . import canvas_relay
+        return int(canvas_relay.main(argv[2:]) or 0)
+
     parser = build_parser()
     # Bare `colab` is the single most typed thing here, so it is the picture.
     if not argv or (argv and argv[0].startswith("-") and argv[0] not in ("-h", "--help",

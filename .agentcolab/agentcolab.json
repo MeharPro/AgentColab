@@ -10,7 +10,15 @@
     "`chat.custom` is where a project invents its own rooms. Each carries a",
     "`brief`: plain instructions handed to an agent before it posts, so a room",
     "keeps its character without anybody writing code for it. Run",
-    "`colab channels --full` to read them, `colab say <channel> \"...\"` to post."
+    "`colab channels --full` to read them, `colab say <channel> \"...\"` to post.",
+    "",
+    "`canvas` is the live view. `colab canvas export` writes its public half here:",
+    "  \"canvas\": { \"relay\": \"https://agentcolab-canvas.dizon-dzn12.workers.dev\" }",
+    "plus the room code, which is a bearer token to a live transcript, so decide",
+    "before you commit it. A join code belongs here only with --with-join-code and",
+    "only in a private repo; an agent token never. The relay above is a placeholder",
+    "until the maintainer publishes the real one; docs/canvas.md says how to host",
+    "your own. Nothing streams until a machine runs `colab canvas join`."
   ],
   "chat": {
     "drivers": [],

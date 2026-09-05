@@ -78,7 +78,7 @@ shows them — degrading is allowed, hiding is not.
 
 ### T4 — Secret exfiltration
 
-Through a record, or through the chat mirror.
+Through a record, through the chat mirror, or through the canvas mirror.
 
 **Defense, in layers.** A pattern scrubber removes known credential shapes
 (Anthropic, OpenAI, Stripe, GitHub, GitLab, AWS, Slack, Discord, Google, npm,
@@ -104,6 +104,14 @@ band, which does make the key secret.
 
 The structural mitigation is the one that actually holds: the value never leaves
 the machine at all.
+
+The canvas mirror is the exception to be precise about. Its default level sends
+the model's text and tool calls with paths, never tool output, thinking or the
+text of an edit — so file contents still do not leave. At `full`, tool output
+does: `cat .env` sends what the two scrubbing layers did not recognise. That
+level is chosen per agent, capped per room by a policy the relay enforces, and
+lowered but never raised by the committed project config. Which fields leave at
+each level is in [canvas.md](canvas.md#what-leaves-the-machine).
 
 ### T5 — Denial of service
 
@@ -172,17 +180,21 @@ merge queue, and this tool never touches any of them.
 
 **2. A public channel is a public channel.** If an agent can read your secrets
 and write to a public room, that is an exfiltration path, full stop. We narrow
-the pipe: agents get no "post arbitrary text" capability, every event is
-schema-typed and scrubbed, mentions are disarmed so automation can never ping a
-room. We do not close it. Do not attach a private repository to a public
-server.
+the pipe into chat: agents get no "post arbitrary text" capability there, every
+event is schema-typed and scrubbed, mentions are disarmed so automation can
+never ping a room. We do not close it. Do not attach a private repository to a
+public server. A canvas room is a wider pipe, opened on purpose: its transcript
+is the agent's own words and tool calls, scrubbed, readable by anyone holding
+the room code. Do not point a private repository's canvas at a relay you do
+not run.
 
 **3. Model-level susceptibility to injection.** Layered defenses reduce it and
 never eliminate it. The bound that matters: **AgentColab never grants an agent
 a capability it did not already have.** It adds no tool that writes files, runs
-commands, spends money, or reaches the network beyond the git remote and the
-chat webhook. An injected instruction can at most cause an agent to do
-something it could already have done.
+commands, spends money, or reaches the network beyond the git remote, the
+chat webhook, and — once you have joined a room — the canvas relay you chose.
+An injected instruction can at most cause an agent to do something it could
+already have done.
 
 **4. Semantic conflict.** Two changes that merge cleanly, compile, pass the
 tests and are jointly wrong. We detect textual overlap — arithmetic on
@@ -202,10 +214,13 @@ What goes where, exactly:
 | Presence, claims, messages, tasks, findings, bugs | The git remote you configured. Nowhere else. |
 | Chat mirror of the above | Discord's or Slack's servers, scrubbed and truncated |
 | Bot tokens, webhook URLs | `~/.agentcolab/<project>/p/<profile>/config.json`, mode 600. Never the repo, never printed, never published. |
+| Canvas room code | The browser's URL fragment and `localStorage`; after `colab canvas export`, the project's public config. It is a bearer token to a live transcript — treat it like a webhook URL. |
+| Canvas join code | Beside the bot tokens in the per-profile `config.json`, mode 600; printed once by `colab canvas new`; in the repo only with `--with-join-code`. |
+| Canvas agent token | The per-profile `config.json`, mode 600. Never the repo, never printed. |
 | SSH private key | Never read. Signing shells out to `ssh-keygen`, which can also use an agent. |
-| Environment values | Never leave the machine. Only key names, length buckets and keyed digests. |
-| File contents | Never leave the machine. Only paths. |
-| Anything at all | Never to any server operated by this project. There isn't one. |
+| Environment values | Never published. Only key names, length buckets and keyed digests. The canvas at `full` sends tool output, so an agent that reads a `.env` there sends what the scrubber did not recognise — see docs/canvas.md. |
+| File contents | Never leave the machine unless the canvas mirror is on; then tool output leaves at `full` only, scrubbed, to the relay you chose — see docs/canvas.md. |
+| Canvas events | Only after `colab canvas join`, to the relay named in your config: the one you host, or the project's hosted one if you chose it. Nothing else ever goes to a server operated by this project. |
 
 ---
 

@@ -5,8 +5,10 @@ Instructions for any AI agent working on **AgentColab** itself.
 ## What this is
 
 A coordination layer for AI coding agents that belong to different people, run
-on different machines, and are usually different models. State rides on a custom
-git ref; there is no server.
+on different machines, and are usually different models. Coordination state
+rides on a custom git ref and has no server. The optional canvas — a live view
+of each agent's transcript — has a relay, and it is off until a machine joins a
+room.
 
 Read [RULES.md](RULES.md) first — it governs behaviour here and it is written
 for you. [FAILURE-MODES.md](FAILURE-MODES.md) is what is known to be broken;
@@ -23,6 +25,8 @@ agentcolab/
   board.py       deterministic work assignment, leases, contested takes
   session.py     presence, the briefing, chat mirroring, token budget
   chat/          Discord + Slack adapters behind one interface
+  canvas.py      transcript tailer, sanitising per level, the daemon, roles and asks
+  canvas_relay.py the stdlib canvas relay, reference for the contract in docs/canvas-contract.md
   hooks.py       harness integration and the pre-edit warning
   mcp.py         MCP server over stdio, no SDK
   cli.py         every command
@@ -68,6 +72,13 @@ bugs.
 - `git status --porcelain` has a position-dependent prefix that `strip()` eats.
   Use `diff --name-only` and `ls-files --others`.
 - The entropy scrubber must mask URLs first or it mangles long paths.
+- A canvas event's `seq` must come from its position in the transcript file,
+  never from a counter. Two producers over the same file — a daemon and a hook
+  flush — have to agree without talking, and a counter makes every overlap a
+  duplicate the viewer cannot detect.
+- The canvas daemon must never be spawned inside `store.lock()`. The child
+  inherits the lock's descriptor and holds it for as long as it lives, so every
+  hook on the machine waits on a process that will not exit for thirty minutes.
 
 ## Style
 

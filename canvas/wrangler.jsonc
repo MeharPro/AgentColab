@@ -1,0 +1,27 @@
+// Deploy: cd canvas && npx wrangler@4 deploy. No build step; worker.js is the
+// artefact. Local: npx wrangler@4 dev --port 8787 --local.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentcolab-canvas",
+  "main": "./worker.js",
+  // Kept a few weeks behind today so the pinned runtime always exists.
+  "compatibility_date": "2026-08-01",
+  "assets": {
+    "directory": "./web",
+    "binding": "ASSETS",
+    // The room code rides in the URL fragment, so every non-API path is the
+    // one page; the Worker sees only the contract's routes (and the internal
+    // creation path, which it refuses, A16).
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/r/*", "/rooms", "/healthz", "/__create", "/__create/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "ROOM", "class_name": "Room" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+  // Room creation is the one unauthenticated write: 5 per minute per IP (§2).
+  "ratelimits": [
+    { "name": "CREATE", "namespace_id": "1001", "simple": { "limit": 5, "period": 60 } }
+  ],
+  "observability": { "enabled": true, "head_sampling_rate": 0.05 }
+}

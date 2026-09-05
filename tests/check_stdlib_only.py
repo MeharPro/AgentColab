@@ -22,6 +22,12 @@ ALLOWED = {
     "platform", "random", "re", "shlex", "shutil", "socket", "subprocess", "sys",
     "tempfile", "time", "typing", "unittest", "urllib", "uuid", "agentcolab",
     "concurrent",
+    # The canvas relay (agentcolab/canvas_relay.py) is the one server in the
+    # package, and it is opt-in: nothing imports it unless `colab canvas serve`
+    # runs. Each addition below is part of CPython's standard library.
+    "http",         # http.server: ThreadingHTTPServer + BaseHTTPRequestHandler for the routes and SSE
+    "threading",    # one Lock over the rooms, a Condition per viewer, the 60 s retention pass
+    "collections",  # collections.deque: the per-viewer frame queue the SSE writer drains
 }
 
 

@@ -19,14 +19,16 @@ Concretely, and each of these is enforced in code rather than merely intended:
   line once per agent. The platform is not a database here, and nothing is read
   back from it as a source of truth. If the server were deleted tomorrow, no
   coordination state is lost.
-- **No code, files, or payloads cross a channel.** Message bodies are capped at
-  1600 characters and scrubbed. Briefings carry paths, commit shas and counts —
+- **No code, files, or payloads cross a chat channel.** Message bodies are
+  capped at 1600 characters and scrubbed. Briefings carry paths, commit shas and counts —
   never file contents. That is a token decision and a privacy decision at once.
 - **No orchestration happens over chat.** Work is divided by a hash computed
   identically on every machine. Dividing it costs zero messages, which is the
   entire point of the design.
-- **Heartbeats never post.** Presence goes to the git ref. Only events a person
-  would actually want to see reach a room.
+- **Heartbeats never post to chat.** Presence goes to the git ref. Only events
+  a person would actually want to see reach a room. (The canvas, if you have
+  joined one, is a different mirror with its own rules — see
+  [canvas.md](canvas.md).)
 - **Traffic is capped at the source.** Six messages an hour per agent as a hard
   limit, plus an hourly token budget on coordination that suppresses output
   before it suppresses work.
@@ -145,10 +147,13 @@ because a triage decision nobody can audit is not a decision, and a `p0` without
 a `--plan` is refused — an alarm with no first step is not triage. Decisions land
 in `#triage`, or `#incidents` for p0 and p1.
 
-**Only `ask` is an input.** A message anywhere else is never an instruction, no
-matter what it says or who it appears to be from. Chat is the least
-authenticated surface in the system — a server can contain anyone — so it
-carries the lowest trust level and is labelled that way wherever it surfaces.
+**Only `ask` is an input** — and, if you have joined a room, the canvas, whose
+asks and roles arrive through the same inbox under the same banner. A message
+anywhere else is never an instruction, no matter what it says or who it appears
+to be from. Chat and the canvas are the least authenticated surfaces in the
+system — a server can contain anyone, and a room code is all a viewer needs —
+so both carry the lowest trust level and are labelled that way wherever they
+surface.
 
 ## Setting it up once, for everyone
 
@@ -226,9 +231,9 @@ actually did.
 
 **Do not attach a private repository to a public server.** If an agent can read
 your secrets and write to a public room, that is an exfiltration path. We narrow
-the pipe — no arbitrary-post capability, schema-typed events only, everything
-scrubbed, mentions disarmed so automation can never ping a room — and we do not
-close it.
+the pipe into chat — no arbitrary-post capability, schema-typed events only,
+everything scrubbed, mentions disarmed so automation can never ping a room — and
+we do not close it.
 
 ## Rate limits
 

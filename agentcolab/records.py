@@ -138,6 +138,16 @@ def content_id(prefix: str, *parts: str) -> str:
 # Anything credential-shaped must never reach a shared git ref or a chat
 # channel. Both are permanent and readable by more people than the repo.
 _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # The canvas credentials (docs/canvas-contract.md section 1). Their alphabet
+    # has no vowels and no 0/1/i/l, so a run of it cannot be a word; the room
+    # code alone is deliberately NOT matched -- it is the viewer URL and lives in
+    # the repo by design -- only the join code (room code plus a dotted tail)
+    # and the agent token, both short enough that the entropy pass misses them.
+    (re.compile(r"\b[2-9abcdefghjkmnpqrstvwxyz]{4}-[2-9abcdefghjkmnpqrstvwxyz]{4}-"
+                r"[2-9abcdefghjkmnpqrstvwxyz]{2}\.[2-9abcdefghjkmnpqrstvwxyz]{24}\b"),
+     "[REDACTED:canvas-join-code]"),
+    (re.compile(r"\bat-[2-9abcdefghjkmnpqrstvwxyz]{32}\b"), "[REDACTED:canvas-token]"),
+    (re.compile(r"\bvt-[2-9abcdefghjkmnpqrstvwxyz]{32}\b"), "[REDACTED:canvas-ticket]"),
     (re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{16,}"), "[REDACTED:anthropic-key]"),
     (re.compile(r"\bsk-proj-[A-Za-z0-9_\-]{16,}"), "[REDACTED:openai-key]"),
     (re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}"), "[REDACTED:openai-key]"),

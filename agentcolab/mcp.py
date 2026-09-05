@@ -307,6 +307,15 @@ def handle(store: Store, message: dict[str, Any]) -> dict[str, Any] | None:
 
 def serve(store: Store) -> int:
     """Blocking stdio loop. Newline-delimited JSON, one message per line."""
+    # Codex and the other MCP harnesses have no SessionStart hook, and this
+    # process lives exactly as long as their session -- so it is the one place
+    # that can start the canvas tailer for them. Claude Code has hooks and does
+    # not need it. Suppressed and gated: an unreachable relay must never stop
+    # the MCP server from serving tools.
+    with contextlib.suppress(Exception):
+        from . import canvas
+        if canvas.is_on(store) and str(store.config().get("harness") or "") != "claude-code":
+            canvas.ensure_tailers_for_cwd(store)
     stdout = sys.stdout
     for line in sys.stdin:
         line = line.strip()
