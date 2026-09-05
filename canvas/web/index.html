@@ -799,7 +799,7 @@ function laneOf(a, session, lane) {
   const key = session + "/" + lane;
   let l = a.lanes.get(key);
   if (!l) {
-    l = { key, session, lane, events: [], ids: new Set(), byRef: new Map(), title: null, firstTs: 0, newestTs: 0,
+    l = { key, session, lane, events: [], ids: new Set(), byRef: new Map(), title: null, parent: null, nickname: null, firstTs: 0, newestTs: 0,
           dirty: true, rebuild: true, from: -1, tailHidden: 0, rows: new Map(), el: el("div", "rows"), follow: true, unseen: 0, exhausted: false, fetching: false };
     a.lanes.set(key, l);
     a.tabsDirty = true;
@@ -841,7 +841,14 @@ function ingestEvent(a, ev, rseq, back) {
   if (kind === "tool_call" && ev.ref) { const j = l.byRef.get(ev.ref) || {}; j.call = ev; l.byRef.set(ev.ref, j); if (j.result) j.result._hasCall = true; }
   if (kind === "tool_result" && ev.ref) { const j = l.byRef.get(ev.ref) || {}; j.result = ev; l.byRef.set(ev.ref, j); if (j.call) { ev._hasCall = true; patchToolRow(l, j.call); } }
   if (kind === "session") {
-    if (ev.body.title) l.title = str(ev.body.title, 60);
+    const b = ev.body, was = [l.title, l.parent, l.nickname].join("\u0001");
+    if (b.title) l.title = str(b.title, 60);
+    /* a Codex subagent is a separate thread — its own session — that names the thread that forked it and the
+       nickname it was given; the tabs nest on `parent` and label on `nickname` (sessionTree, laneLabel). A session
+       naming itself as parent is an upstream bug and is ignored rather than drawn as its own child */
+    if (typeof b.parent === "string" && b.parent && b.parent !== l.session) l.parent = str(b.parent, 64);
+    if (typeof b.nickname === "string" && b.nickname.trim()) l.nickname = str(b.nickname.trim(), 40);
+    if ([l.title, l.parent, l.nickname].join("\u0001") !== was) a.tabsDirty = true;   /* a label changed under a pinned tab */
     if (l.lane === "main") { if (ev.body.state === "end") { a.ended = true; a.endedAt = ev._t; } else if (ev.body.state === "start") a.ended = false; }
   } else if (a.ended && ev._t > a.endedAt) a.ended = false;
   if (!l.firstTs || ev._t < l.firstTs) l.firstTs = ev._t;
@@ -914,6 +921,10 @@ function applyAgentObj(o, rseq) {
   else if (o.role === null && rseq) applyRole(o.name, null, rseq);
   if (o.snapshot && typeof o.snapshot === "object") {
     a.snapshot = o.snapshot;
+    /* the snapshot can name a session's title, parent and nickname; a change must relabel the tabs even when the
+       viewer pinned one, which the event path in ingestEvent would not do for it */
+    const sk = [o.snapshot.session, o.snapshot.title, o.snapshot.parent, o.snapshot.nickname].map((v) => str(v)).join("\u0001");
+    if (sk !== a.snapKey) { a.snapKey = sk; a.tabsDirty = true; }
     const seen = o.snapshot.role_seen_seq | 0;
     if (seen !== a.roleSeenSeq) { a.roleSeenSeq = seen; a.roleSeenAt = parseTs(o.last_seen) || Date.now(); }
     if (o.snapshot.state === "gone") { a.ended = true; a.endedAt = a.endedAt || Date.now(); }
@@ -1504,19 +1515,70 @@ function patchHeader(a) {
     if (Date.now() - a.sparkAt > 5000) { a.sparkAt = Date.now(); w.spark.querySelector("polyline").setAttribute("points", sparkPoints(a)); }
   }
 }
+/* A short handle for a session with no title. Codex thread ids are UUIDv7: the first 8 hex digits are the top of a
+   millisecond timestamp and roll over every 65 s, so two threads forked within a minute both printed as `019a2c7e`
+   and the viewer could not tell them apart. A v7's random bits are at its tail, so it is shown by its last 8. Any
+   other id (Claude's are v4, random throughout) keeps its first 8, which is also what `claude --resume` and the
+   transcript filename show, so the tab still matches what the person sees in their own terminal. */
+function shortId(sid) {
+  if (!sid) return "main";
+  const v7 = sid.length >= 36 && sid[8] === "-" && sid[13] === "-" && sid[14] === "7";
+  return v7 ? sid.slice(-8) : sid.slice(0, 8);
+}
+/* The agent snapshot describes one session: the one it names, or — clients that predate `snapshot.session` never
+   name it — the newest one seen. */
+function snapshotFor(a, session) {
+  const s = a.snapshot;
+  if (!s) return null;
+  const sid = typeof s.session === "string" && s.session ? s.session : a.newestSession;
+  return sid === session ? s : null;
+}
+/* `parent` or `nickname` of a session: from any of its lanes' session events, else from a snapshot about it */
+function sessionField(a, s, field) {
+  for (const l of s.lanes) if (l[field]) return l[field];
+  const snap = snapshotFor(a, s.session);
+  return snap && typeof snap[field] === "string" && snap[field] ? str(snap[field], 64) : null;
+}
 function laneLabel(l, a) {
   if (l.lane !== "main") return str(l.lane, 12);
+  const snap = snapshotFor(a, l.session);
+  /* a forked thread goes by the nickname its parent gave it — what Codex's own sidebar shows — ahead of any title */
+  const nick = l.nickname || (snap && typeof snap.nickname === "string" && snap.nickname);
+  if (nick) return str(nick, 24);
   if (l.title) return l.title;
-  const s = a.snapshot;
-  if (s && s.title && a.newestSession === l.session) return str(s.title, 40);
-  return l.session ? l.session.slice(0, 8) : "main";
+  if (snap && snap.title) return str(snap.title, 40);
+  return shortId(l.session);
 }
+/* One agent's sessions as a forest. A session whose `parent` is another session of the same agent hangs under it;
+   a parent that is not here, a self-reference or a cycle makes a root instead, so no session can vanish from the
+   tabs. Roots go newest-first, a fresh subagent counting for its parent so the group it belongs to stays in front;
+   children go oldest-first, the order they were forked. Also sets `a.newestSession`, which is what an unnamed
+   snapshot's title is taken to be about. */
+function sessionTree(a) {
+  const groups = new Map();
+  for (const l of a.lanes.values()) {
+    let s = groups.get(l.session);
+    if (!s) { s = { session: l.session, lanes: [], newest: 0, first: Infinity, parent: null, children: [] }; groups.set(l.session, s); }
+    s.lanes.push(l); s.newest = Math.max(s.newest, l.newestTs); s.first = Math.min(s.first, l.firstTs);
+  }
+  a.newestSession = null;
+  for (const s of groups.values()) if (a.newestSession === null || s.newest > groups.get(a.newestSession).newest) a.newestSession = s.session;
+  for (const s of groups.values()) { const p = sessionField(a, s, "parent"); s.parent = p && p !== s.session && groups.has(p) ? groups.get(p) : null; }
+  for (const s of groups.values()) {   /* a cycle is cut at the first node that closes it */
+    const seen = new Set([s]);
+    for (let p = s.parent; p; p = p.parent) { if (seen.has(p)) { s.parent = null; break; } seen.add(p); }
+  }
+  const roots = [];
+  for (const s of groups.values()) (s.parent ? s.parent.children : roots).push(s);
+  const settle = (s) => { s.children.sort((x, y) => x.first - y.first); for (const c of s.children) s.newest = Math.max(s.newest, settle(c)); return s.newest; };
+  for (const r of roots) settle(r);
+  roots.sort((x, y) => y.newest - x.newest);
+  return { groups, roots };
+}
+function mainOf(s) { return s.lanes.find((l) => l.lane === "main") || s.lanes[0]; }
 function patchTabs(a) {
   const w = a.win;
-  const sessions = new Map();
-  for (const l of a.lanes.values()) { let s = sessions.get(l.session); if (!s) { s = { session: l.session, lanes: [], newest: 0 }; sessions.set(l.session, s); } s.lanes.push(l); s.newest = Math.max(s.newest, l.newestTs); }
-  const order = Array.from(sessions.values()).sort((x, y) => y.newest - x.newest);
-  a.newestSession = order.length ? order[0].session : null;
+  const { groups, roots } = sessionTree(a);
   if (!a.active || !a.lanes.has(a.active) || !a.activePinned) {
     /* follow the newest lane until the viewer picks one by hand */
     let best = null;
@@ -1525,21 +1587,24 @@ function patchTabs(a) {
   }
   const active = activeLane(a);
   w.tabs.replaceChildren();
-  w.tabs.hidden = order.length <= 1 && (!active || sessions.get(active.session).lanes.length <= 1);
-  for (const s of order) {
-    const main = s.lanes.find((l) => l.lane === "main") || s.lanes[0];
-    const b = el("button", "tab" + (active && active.session === s.session ? " on" : ""), laneLabel(main, a));
-    b.type = "button"; b.title = s.session || "main";
-    b.onclick = (e) => { e.stopPropagation(); a.active = main.key; a.activePinned = true; swapLane(a, main); a.tabsDirty = true; markDirty(a); };
+  w.tabs.hidden = groups.size <= 1 && (!active || groups.get(active.session).lanes.length <= 1);
+  const pick = (l) => (e) => { e.stopPropagation(); a.active = l.key; a.activePinned = true; swapLane(a, l); a.tabsDirty = true; markDirty(a); };
+  const tab = (s, sub) => {
+    const main = mainOf(s);
+    const b = el("button", "tab" + (sub ? " sub" : "") + (active && active.session === s.session ? " on" : ""), laneLabel(main, a));
+    b.type = "button"; b.title = (sub ? "forked from " + laneLabel(mainOf(s.parent), a) + " · " : "") + (s.session || "main");
+    b.onclick = pick(main);
     w.tabs.append(b);
-  }
-  if (active && sessions.get(active.session).lanes.length > 1) {
+    for (const c of s.children) tab(c, true);   /* a forked session sits right after its parent, as a sub tab */
+  };
+  for (const s of roots) tab(s, false);
+  if (active && groups.get(active.session).lanes.length > 1) {
     w.tabs.append(el("span", "brk"));
-    const subs = sessions.get(active.session).lanes.slice().sort((x, y) => (x.lane === "main" ? -1 : y.lane === "main" ? 1 : x.firstTs - y.firstTs));
+    const subs = groups.get(active.session).lanes.slice().sort((x, y) => (x.lane === "main" ? -1 : y.lane === "main" ? 1 : x.firstTs - y.firstTs));
     for (const l of subs) {
       const b = el("button", "tab sub" + (l === active ? " on" : ""), l.lane === "main" ? "main" : str(l.lane, 14));
       b.type = "button"; b.title = l.lane;
-      b.onclick = (e) => { e.stopPropagation(); a.active = l.key; a.activePinned = true; swapLane(a, l); a.tabsDirty = true; markDirty(a); };
+      b.onclick = pick(l);
       w.tabs.append(b);
     }
   }
@@ -2202,7 +2267,7 @@ function renderSide(a) {
   const names0 = Array.from(S.agents.values()).filter((x) => x.win && !x.kicked).sort((x, y) => (x.name < y.name ? -1 : 1));
   const active0 = activeLane(a);
   const key = [a.name, S.follow, isCodex(a), a.wakePending ? "p" : "", JSON.stringify(wakeOf(a)), active0 ? active0.key : "", ownerTokenFor(a.name) ? "o" : ""]
-    .concat(names0.map((x) => x.name + ":" + stateShort(x) + ":" + (x === a ? Array.from(x.lanes.keys()).join("|") + ":" + x.lanes.size : ""))).join(" ");
+    .concat(names0.map((x) => x.name + ":" + stateShort(x) + ":" + (x === a ? Array.from(x.lanes.values()).map((l) => l.key + "=" + laneLabel(l, x) + "<" + (l.parent || "")).join("|") + ":" + x.lanes.size : ""))).join("\u0000");
   if (side.dataset.key === key) return;
   side.dataset.key = key;
   side.replaceChildren();
@@ -2217,24 +2282,29 @@ function renderSide(a) {
     b.onclick = () => { S.follow = false; lsSet("canvas:follow", false); focusAgent(x.name); };
     side.append(b);
     if (x !== a) continue;
-    /* this agent's sessions, subagent lanes nested under the one that is open */
-    const sessions = new Map();
-    for (const l of x.lanes.values()) { let s = sessions.get(l.session); if (!s) { s = { session: l.session, lanes: [], newest: 0 }; sessions.set(l.session, s); } s.lanes.push(l); s.newest = Math.max(s.newest, l.newestTs); }
+    /* this agent's sessions as sessionTree groups them — forked threads under their parent, the same shape as the
+       window's tabs — with subagent lanes nested under the session that is open */
+    const { roots } = sessionTree(x);
     const active = activeLane(x);
-    for (const s of Array.from(sessions.values()).sort((p, q) => q.newest - p.newest)) {
-      const main = s.lanes.find((l) => l.lane === "main") || s.lanes[0];
+    const pick = (l) => () => { x.active = l.key; x.activePinned = true; swapLane(x, l); x.tabsDirty = true; markDirty(x); S.view = null; renderView(true); };
+    const ses = (s, sub) => {
+      const main = mainOf(s);
       const on = active && active.session === s.session;
-      const sb = el("button", "ses" + (on ? " on" : ""), laneLabel(main, x)); sb.type = "button"; sb.title = s.session || "main";
-      sb.onclick = () => { x.active = main.key; x.activePinned = true; swapLane(x, main); x.tabsDirty = true; markDirty(x); S.view = null; renderView(true); };
+      const sb = el("button", "ses" + (sub ? " sub" : "") + (on ? " on" : ""), laneLabel(main, x)); sb.type = "button";
+      sb.title = (sub ? "forked from " + laneLabel(mainOf(s.parent), x) + " · " : "") + (s.session || "main");
+      sb.onclick = pick(main);
       side.append(sb);
-      if (!on || s.lanes.length <= 1) continue;
-      for (const l of s.lanes.slice().sort((p, q) => (p.lane === "main" ? -1 : q.lane === "main" ? 1 : p.firstTs - q.firstTs))) {
-        if (l.lane === "main") continue;
-        const lb = el("button", "ses sub" + (l === active ? " on" : ""), str(l.lane, 24) + " (subagent)"); lb.type = "button"; lb.title = l.lane;
-        lb.onclick = () => { x.active = l.key; x.activePinned = true; swapLane(x, l); x.tabsDirty = true; markDirty(x); S.view = null; renderView(true); };
-        side.append(lb);
+      if (on && s.lanes.length > 1) {
+        for (const l of s.lanes.slice().sort((p, q) => (p.lane === "main" ? -1 : q.lane === "main" ? 1 : p.firstTs - q.firstTs))) {
+          if (l.lane === "main") continue;
+          const lb = el("button", "ses sub" + (l === active ? " on" : ""), str(l.lane, 24) + " (subagent)"); lb.type = "button"; lb.title = l.lane;
+          lb.onclick = pick(l);
+          side.append(lb);
+        }
       }
-    }
+      for (const c of s.children) ses(c, true);
+    };
+    for (const r of roots) ses(r, false);
   }
   const foot = el("div", "foot");
   const box = el("div", "wakebox"); box.append(wakeWidget(a));
@@ -3012,6 +3082,22 @@ const DEMO_SCRIPTS = {
     { k: "tool_result", b: { ok: true, exit: 0, bytes: 40, lines: 3, paths: [], image: false, text: "Ran 61 tests in 4.812s\n\nOK" }, ref: "call_f0c1d2" },
     { k: "text", b: { text: "RelayContract is green: 61 tests. The prune horizon now rises on byte eviction as well as on the age pass.", final: true } },
   ],
+  /* two threads sam's thread forked within the same minute. Their ids share the parent's first 8 hex digits (UUIDv7),
+     which is why the tabs nest on `parent`, label on `nickname`, and fall back to the id's tail */
+  "sam-codex/explorer": [
+    { k: "session", b: { state: "start", source: "codex", parent: "019a2c7e-5d0b-7a31-9e44-2f6b8c1d0e77", nickname: "explorer" } },
+    { k: "prompt", b: { text: "Read agentcolab/canvas_relay.py and report where the prune horizon is read and where it is written.", source: "parent" } },
+    { k: "tool_call", b: { name: "shell", args: { command: ["bash", "-lc", "rg -n 'horizon' agentcolab/canvas_relay.py"] }, paths: ["agentcolab/canvas_relay.py"], omitted: {} }, ref: "call_1a2b3c" },
+    { k: "tool_result", b: { ok: true, exit: 0, bytes: 188, lines: 3, paths: [], image: false, text: "288:        self.horizon = 0\n305:            self.horizon = rows[0].rseq\n412:        horizon = self.horizon" }, ref: "call_1a2b3c" },
+    { k: "text", b: { text: "Written once, in the age pass at 305; read at 412 — before the delete at 419, which is the bug.", final: true } },
+  ],
+  "sam-codex/reviewer": [
+    { k: "session", b: { state: "start", source: "codex", parent: "019a2c7e-5d0b-7a31-9e44-2f6b8c1d0e77", nickname: "reviewer" } },
+    { k: "prompt", b: { text: "Review the horizon patch to canvas_relay.py for an off-by-one.", source: "parent" } },
+    { k: "tool_call", b: { name: "read_file", args: { path: "agentcolab/canvas_relay.py", line: 296, count: 30 }, paths: ["agentcolab/canvas_relay.py"], omitted: {} }, ref: "call_4d5e6f" },
+    { k: "tool_result", b: { ok: true, exit: null, bytes: 1480, lines: 30, paths: ["agentcolab/canvas_relay.py"], image: false }, ref: "call_4d5e6f" },
+    { k: "text", b: { text: "The horizon is the first *kept* rseq, so `hello.gap.before_rseq` must be `horizon - 1`, not `horizon`. One line.", final: true } },
+  ],
   "alice-claude-code": [
     { k: "session", b: { state: "start", source: "startup", title: null } },
     { k: "prompt", b: { text: "port the hooks to Windows; the SessionEnd marker path is wrong there" } },
@@ -3093,10 +3179,14 @@ function startDemo() {
   for (const k in demo.wake) demo.machine[k] = { enabled: demo.wake[k].enabled, from: demo.wake[k].from, max_per_hour: demo.wake[k].max_per_hour };
   const specs = DEMO_AGENTS.map((d) => Object.assign({ seqs: {} }, d));
   const sub = Object.assign({}, specs[0], { lane: "agent-3fa1c2", seqs: specs[0].seqs });
+  /* sam's forks are whole sessions of the same agent, not lanes: a Codex subagent is its own thread with its own rollout file */
+  const fork = (session) => Object.assign({}, specs[1], { session, seqs: {}, fork: true });
   const runners = [
     { spec: specs[0], script: DEMO_SCRIPTS["mehar-claude-code"], i: 0 },
     { spec: sub, script: DEMO_SCRIPTS["mehar-claude-code/agent-3fa1c2"], i: 0 },
     { spec: specs[1], script: DEMO_SCRIPTS["sam-codex"], i: 0 },
+    { spec: fork("019a2c7e-6a1c-7b02-8f5a-1e7d3b9c4a21"), script: DEMO_SCRIPTS["sam-codex/explorer"], i: 0 },
+    { spec: fork("019a2c7e-6a1d-7c93-9b06-4d2e8f7a1c55"), script: DEMO_SCRIPTS["sam-codex/reviewer"], i: 0 },
     { spec: specs[2], script: DEMO_SCRIPTS["alice-claude-code"], i: 0 },
   ];
   demo.runners = runners; demo.specs = specs;
@@ -3121,7 +3211,7 @@ function startDemo() {
     /* the same pauses the live loop uses, stretched at most fourfold towards the last eight minutes:
        a tool result still lands seconds after its call, never a uniform half-minute later */
     const waits = r.script.map(pause), total = waits.reduce((s, w) => s + w, 0), scale = clamp(480000 / total, 1, 4);
-    let t = now - total * scale - 30000 + (r.spec.lane ? 20000 : 0), batch = [];
+    let t = now - total * scale - 30000 + (r.spec.lane || r.spec.fork ? 20000 : 0), batch = [];
     for (let i = 0; i < n; i++) {
       batch.push(demoEvent(r.spec, r.script[i], t));
       t += waits[i] * scale;

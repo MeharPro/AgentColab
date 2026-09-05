@@ -26,6 +26,7 @@ import contextlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -121,12 +122,25 @@ def decide(store: Store, message: dict[str, Any], config: dict[str, Any] | None 
     if cfg.get("from") == "agents" and kind != "agent":
         return "declined", "sender not allowed"
     alive = running if running is not None else session_running(store)
-    if alive:
+    if alive and has_hooks(store):
+        # True for Claude Code: its UserPromptSubmit hook puts the message in
+        # front of the running session at its next prompt. False for Codex,
+        # which has no hooks -- a running Codex thread learns nothing until it
+        # happens to run `colab`, so the only automatic path is a new headless
+        # session beside it. The hourly cap still bounds that.
         return "busy", "a session is running; it sees this on its next turn"
     count = used if used is not None else used_this_hour(store)
     if count >= int(cfg.get("max_per_hour") or 1):
         return "busy", "hourly cap"
     return "woke", None
+
+
+HOOKED_HARNESSES = ("claude-code",)
+
+
+def has_hooks(store: Store) -> bool:
+    """Can a running session of this harness be reached without starting a new one?"""
+    return str(store.config().get("harness") or "") in HOOKED_HARNESSES
 
 
 def session_running(store: Store) -> bool:
@@ -174,12 +188,18 @@ def prompt(message: dict[str, Any], config: dict[str, Any], *, me: str = "", use
 _CHILDREN: list[subprocess.Popen] = []
 
 
-def harness_argv(harness: str, text: str) -> list[str] | None:
-    """The headless command for a harness, or None when it has none we know."""
+def harness_argv(harness: str, text: str | None = None) -> list[str] | None:
+    """The headless command for a harness, or None when it has none we know.
+
+    The prompt is not in it: `start_session` hands it over on stdin, which
+    `codex exec -` and `claude -p` (with no prompt argument) both read. `text`
+    is accepted and ignored so `colab wake test`, which prints the command,
+    keeps its call.
+    """
     if harness == "claude-code":
-        return ["claude", "-p", text]
+        return ["claude", "-p"]
     if harness == "codex":
-        return ["codex", "exec", text]
+        return ["codex", "exec", "-"]
     return None
 
 
@@ -197,7 +217,7 @@ def _prune_logs(directory: Path, cap: int = LOG_CAP) -> None:
     is applied each time a new session starts instead.
     """
     with contextlib.suppress(OSError):
-        logs = sorted(directory.glob("*.log"), key=lambda p: p.stat().st_mtime)
+        logs = sorted([*directory.glob("*.log"), *directory.glob("*.prompt")], key=lambda p: p.stat().st_mtime)
         total = sum(p.stat().st_size for p in logs)
         for path in logs:
             if total <= cap:
@@ -208,32 +228,42 @@ def _prune_logs(directory: Path, cap: int = LOG_CAP) -> None:
 
 def start_session(store: Store, message: dict[str, Any], config: dict[str, Any], *,
                   used: int = 0, dry_run: bool = False) -> tuple[bool, str]:
-    """Start the harness headless, detached like the tailer. (ok, detail)."""
+    """Start the harness headless, detached like the tailer. (ok, detail).
+
+    The prompt goes on stdin from `wake/<message id>.prompt`, never in argv.
+    On Windows both CLIs are npm `.cmd` shims, which CreateProcess hands to
+    cmd.exe, and cmd.exe does not read `list2cmdline` quoting: a message
+    containing `" & calc.exe & "` would have run on the woken machine, and the
+    message is the one string here a stranger typed. A file rather than a
+    pipe, so the listener never waits on a child slow to read it. The binary
+    is resolved with `shutil.which`, which knows PATHEXT; CreateProcess only
+    ever appends `.exe`, so `codex` alone was "not on PATH" on every Windows
+    machine.
+    """
     harness = str(store.config().get("harness") or "claude-code")
-    text = prompt(message, config, me=str(store.config().get("agent") or ""), used=used)
-    argv = harness_argv(harness, text)
+    argv = harness_argv(harness)
     if argv is None:
         return False, f"no headless command for harness {harness!r}"
+    text = prompt(message, config, me=str(store.config().get("agent") or ""), used=used)
     ident = records.slug(str(message.get("id") or "message"), 64)
-    shown = " ".join(argv[:2]) + " <prompt>"
+    shown = " ".join(argv) + f" < {ident}.prompt"
     if dry_run:
         return True, f"dry run: would start `{shown}` in {store.repo_root}"
+    binary = shutil.which(argv[0])
+    if binary is None:
+        return False, f"{argv[0]} is not on PATH"
     try:
         directory = _log_dir(store)
         _prune_logs(directory)
         log = directory / f"{ident}.log"
+        prompt_file = directory / f"{ident}.prompt"
+        prompt_file.write_text(text, encoding="utf-8")
         env = canvas.child_env(store, AGENTCOLAB_WAKE=ident)
-        extra: dict[str, Any] = {}
-        if os.name == "nt":
-            extra["creationflags"] = (getattr(subprocess, "DETACHED_PROCESS", 0)
-                                      | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-        else:
-            extra["start_new_session"] = True
-        with open(log, "wb") as handle:
+        with open(log, "wb") as handle, open(prompt_file, "rb") as stdin:
             handle.write(f"# {iso()} {shown}\n".encode("utf-8"))
-            child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=handle, stderr=handle,
+            child = subprocess.Popen([binary] + argv[1:], stdin=stdin, stdout=handle, stderr=handle,
                                      close_fds=True, cwd=str(store.repo_root), env=env,
-                                     **{**records.quiet_child(), **extra})
+                                     **canvas.detached_kwargs())
         # Kept so a finished session is reaped and a running one is not
         # complained about when its handle is collected; nothing waits on it.
         _CHILDREN[:] = [c for c in _CHILDREN if c.poll() is None] + [child]
@@ -465,15 +495,10 @@ def ensure_listener(store: Store) -> str:
         with contextlib.suppress(OSError):
             canvas._marker(store, canvas.WAKE_STOP).unlink()
         env = canvas.child_env(store)
-        extra: dict[str, Any] = {}
-        if os.name == "nt":
-            extra["creationflags"] = (getattr(subprocess, "DETACHED_PROCESS", 0)
-                                      | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-        else:
-            extra["start_new_session"] = True
         with open(log, "ab") as log_fd:
             child = subprocess.Popen(list(LISTENER_ARGV), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                     stderr=log_fd, close_fds=True, cwd=str(store.repo_root), env=env, **extra)
+                                     stderr=log_fd, close_fds=True, cwd=str(store.repo_root), env=env,
+                                     **canvas.detached_kwargs())
         pidfile.write_text(str(child.pid), encoding="utf-8")
         return "spawned"
     except Exception:
@@ -507,6 +532,10 @@ def login_item_path(store: Store) -> Path | None:
         return Path.home() / "Library" / "LaunchAgents" / f"{_label(store)}.plist"
     if system == "Linux":
         return Path.home() / ".config" / "systemd" / "user" / f"{_label(store)}.service"
+    if system == "Windows":
+        # schtasks takes one program path and cannot nest quotes, so the task
+        # runs a .cmd that sets the environment and the directory itself.
+        return canvas.markers_dir(store) / "wake-listener.cmd"
     return None
 
 
@@ -517,9 +546,12 @@ def _xml(text: str) -> str:
 def install_login_item(store: Store) -> list[str]:
     """Write the login item for this platform; returns the lines to print.
 
-    macOS: a `launchd` user agent; Linux: a `systemd --user` unit; Windows:
-    the `schtasks` command, printed rather than run -- scheduling a task is a
-    change to the user's account this tool should ask for, not make.
+    macOS: a `launchd` user agent; Linux: a `systemd --user` unit; Windows: a
+    `.cmd` beside the markers and the `schtasks` command that schedules it,
+    printed rather than run -- scheduling a task is a change to the user's
+    account this tool should ask for, not make. All three carry PYTHONPATH:
+    a login item starts `python -m agentcolab` with none of the launcher's
+    path fix-up, and a git-clone install imports only with it.
     """
     system = platform.system()
     log = canvas._marker(store, "wake.log")
@@ -538,6 +570,7 @@ def install_login_item(store: Store) -> list[str]:
             f"  <key>WorkingDirectory</key><string>{_xml(str(store.repo_root))}</string>\n"
             "  <key>EnvironmentVariables</key>\n  <dict>\n"
             f"    <key>AGENTCOLAB_PROFILE</key><string>{_xml(store.profile)}</string>\n"
+            f"    <key>PYTHONPATH</key><string>{_xml(canvas.PACKAGE_PARENT)}</string>\n"
             f"    <key>PATH</key><string>{_xml(os.environ.get('PATH', '/usr/bin:/bin'))}</string>\n"
             "  </dict>\n"
             "  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><false/>\n"
@@ -555,8 +588,10 @@ def install_login_item(store: Store) -> list[str]:
         path.write_text(
             "[Unit]\nDescription=AgentColab wake listener (%s)\nAfter=network-online.target\n\n"
             "[Service]\nExecStart=%s\nWorkingDirectory=%s\nEnvironment=AGENTCOLAB_PROFILE=%s\n"
+            'Environment="PYTHONPATH=%s"\n'
             "Restart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy=default.target\n"
-            % (store.profile, " ".join(_shell_quote(a) for a in argv), store.repo_root, store.profile),
+            % (store.profile, " ".join(_shell_quote(a) for a in argv), store.repo_root, store.profile,
+               canvas.PACKAGE_PARENT),
             encoding="utf-8")
         command = ["systemctl", "--user", "enable", "--now", path.name]
         enabled = False
@@ -565,9 +600,21 @@ def install_login_item(store: Store) -> list[str]:
             enabled = subprocess.run(command, capture_output=True, timeout=10, **records.quiet_child()).returncode == 0
         return [f"login item  {path}",
                 "            enabled" if enabled else f"            enable it with: {' '.join(command)}"]
-    task = " ".join(_shell_quote(a) for a in argv)
+    if system == "Windows" and path is not None:
+        with open(path, "w", encoding="utf-8", newline="\r\n") as handle:
+            handle.write(
+                "@echo off\n"
+                # cmd.exe reads a batch file in the console's code page; this one is UTF-8.
+                "chcp 65001 >nul\n"
+                f'set "PYTHONPATH={canvas.PACKAGE_PARENT}"\n'
+                f'set "AGENTCOLAB_PROFILE={store.profile}"\n'
+                f'cd /d "{store.repo_root}"\n'
+                f'"{sys.executable}" -m agentcolab wake serve >> "{log}" 2>&1\n')
+        return [f"login item  {path}",
+                "            written, not scheduled. To start the listener at logon, run:",
+                f'            schtasks /Create /SC ONLOGON /TN AgentColabWake /TR "{path}"']
     return ["login item  not written on this platform. To start the listener at logon, run:",
-            f'            schtasks /Create /SC ONLOGON /TN AgentColabWake /TR "{task}"']
+            f"            {' '.join(_shell_quote(a) for a in argv)}"]
 
 
 def remove_login_item(store: Store) -> list[str]:
@@ -582,6 +629,9 @@ def remove_login_item(store: Store) -> list[str]:
             subprocess.run(["systemctl", "--user", "disable", "--now", path.name], capture_output=True, timeout=10)
     with contextlib.suppress(OSError):
         path.unlink()
+    if system == "Windows":
+        return [f"login item  removed {path}",
+                "            if you scheduled it, also run: schtasks /Delete /TN AgentColabWake /F"]
     return [f"login item  removed {path}"]
 
 

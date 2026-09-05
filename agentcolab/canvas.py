@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -78,6 +79,8 @@ SURFACE_EVERY = 300
 RECORDS_EVERY = 60
 LOG_MAX = 256 * 1024
 DISCOVER_EVERY = 30
+DISCOVER_PIDFILE = "tail-discover.pid"
+DISCOVER_STOP = "stop-discover"
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
@@ -275,18 +278,44 @@ def _strip_controls(text: str) -> str:
     return text.translate(_CONTROL_TABLE)
 
 
-def _rewriter(repo_root: Path | None) -> Callable[[str], str]:
+def _path_pattern(path: str) -> str:
+    """A regex for `path` written with either slash, in any mix.
+
+    A Windows transcript spells one directory three ways -- `C:\\Users\\x\\repo`
+    from Path, `C:/Users/x/repo` from git, node and the MSYS tools, and a
+    lowercase drive from VS Code and some shells -- and a plain `str.replace`
+    of the Path form let the other two carry the username to the relay.
+    """
+    parts = [p for p in re.split(r"[\\/]+", path) if p]
+    if not parts:
+        return ""
+    lead = r"[\\/]" if path[0] in "\\/" else ""
+    return lead + r"[\\/]+".join(re.escape(p) for p in parts)
+
+
+def _rewriter(repo_root: Path | None, *, home: str | None = None,
+              case_insensitive: bool | None = None) -> Callable[[str], str]:
+    """The checkout becomes `.` and the home directory `~`, whatever the spelling.
+
+    One compiled regex, longest alternative first, so a checkout under home
+    is `.` and not `~/repo`; case-insensitive on Windows, whose paths are.
+    `home` and `case_insensitive` are parameters only so a test can put the
+    Windows shapes through it on any platform.
+    """
     root = str(repo_root) if repo_root else ""
-    home = str(Path.home())
-    roots = [r for r in (root, home) if r and r != "/"]
+    home = str(Path.home()) if home is None else home
+    fold = (os.name == "nt") if case_insensitive is None else case_insensitive
+    targets = [(p, mark) for p, mark in ((root, "."), (home, "~")) if p and p != "/"]
+    if not targets:
+        return lambda text: text
+    targets.sort(key=lambda item: len(item[0]), reverse=True)
+    pattern = re.compile("|".join(f"(?P<t{i}>{_path_pattern(p)})" for i, (p, _) in enumerate(targets)),
+                         re.IGNORECASE if fold else 0)
+    marks = {f"t{i}": mark for i, (_, mark) in enumerate(targets)}
 
     def rewrite(text: str) -> str:
-        if root and root in text:
-            text = text.replace(root, ".")
-        if home and home in text:
-            text = text.replace(home, "~")
-        return text
-    return rewrite if roots else (lambda text: text)
+        return pattern.sub(lambda m: marks[m.lastgroup or "t0"], text)
+    return rewrite
 
 
 def _describe(value: Any) -> dict[str, int]:
@@ -911,30 +940,81 @@ def _exit_code(result: Any, ok: bool, text: str) -> int | None:
     return 0 if ok else None
 
 
+def _is_uuid7(value: Any) -> bool:
+    """Codex mints thread and turn ids as UUIDv7, which sort by creation time."""
+    return (isinstance(value, str) and len(value) == 36 and value[14] == "7"
+            and value[8] == value[13] == value[18] == value[23] == "-")
+
+
 class CodexTailer(_Tailer):
     """Codex rollout: `{timestamp, type, payload}` lines (design §3.6)."""
 
     harness = "codex"
+    INDEX_EVERY = 10.0          # seconds between looks at session_index.jsonl
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.cwd: str | None = None
         self.parent: str | None = None
+        self.nickname: str | None = None
+        self.thread: str | None = None          # the id in the first session_meta
+        self.forked = False
+        self.replaying = False                  # inside a fork's copy of its parent's history
+        self.meta_ts: datetime | None = None
         self.calls: dict[str, dict[str, Any]] = {}     # call_id → exit/paths from *_end events
+        self._index_checked = 0.0
+        self._index_mtime = 0.0
+
+    def poll(self, budget: int = READ_BUDGET) -> list[dict[str, Any]]:
+        events = super().poll(budget)
+        title = self._index_title()
+        if title:
+            # Codex keeps the name a person gives a thread outside the rollout,
+            # so this is the one event with no line behind it. Its id is over
+            # the title: two producers reading the same index agree on it.
+            event = build("session", {"state": "start", "source": "title", "title": title},
+                          session=self.session, lane=self.lane, seq=self.seq, epoch=self.epoch,
+                          harness=self.harness, model=self.model, agent=self.agent,
+                          id=content_id("ev", self.session, "title", title))
+            self.unacked.append(event)
+            events.append(event)
+        return events
+
+    def _index_title(self) -> str | None:
+        """A stat every INDEX_EVERY seconds; a read only when the index moved."""
+        now = time.time()
+        if now - self._index_checked < self.INDEX_EVERY:
+            return None
+        self._index_checked = now
+        try:
+            path = codex_session_index()
+            mtime = path.stat().st_mtime
+        except OSError:
+            return None
+        if mtime == self._index_mtime:
+            return None
+        self._index_mtime = mtime
+        name = _thread_name(path, self.thread or self.session)
+        if not name or name == self.title:
+            return None
+        self.title = name
+        return name
 
     def parse(self, line_no: int, entry: dict[str, Any]) -> list[dict[str, Any]]:
         kind = entry.get("type")
         payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
         ts = entry.get("timestamp") if isinstance(entry.get("timestamp"), str) else None
         if kind == "session_meta":
-            self.cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
-            source = payload.get("source")
-            if isinstance(source, dict):
-                spawn = ((source.get("subagent") or {}).get("thread_spawn") or {})
-                parent = spawn.get("parent_thread_id")
-                self.parent = str(parent) if parent else None
-            body = {"state": "start", "source": str(payload.get("originator") or source or "codex")[:60]}
-            return self._blocks(line_no, [("session", body, None, None)], ts=ts)
+            return self._session_meta(line_no, payload, ts)
+        if self.replaying:
+            # A Codex Desktop subagent's rollout opens with a re-serialised copy
+            # of its parent's history -- the parent's metas, prompts and
+            # answers, all stamped within a quarter second of line 1. Streamed
+            # as the child's own, one parent conversation was drawn once per
+            # subagent. The copy ends at the first turn that is the child's.
+            if not self._own_turn(kind, payload, ts):
+                return []
+            self.replaying = False
         if kind == "turn_context":
             model = payload.get("model")
             if isinstance(model, str) and model:
@@ -947,6 +1027,58 @@ class CodexTailer(_Tailer):
         if kind == "response_item":
             return self._response_item(line_no, payload, ts)
         return []
+
+    def _session_meta(self, line_no: int, payload: dict[str, Any], ts: str | None) -> list[dict[str, Any]]:
+        ident = payload.get("id") if isinstance(payload.get("id"), str) else None
+        if self.thread is not None and ident and ident != self.thread:
+            # Another thread's meta inside this file is the parent's, copied
+            # into a fork: not a start of this session, and its cwd is not ours.
+            return []
+        source = payload.get("source")
+        spawn: dict[str, Any] = {}
+        if isinstance(source, dict):
+            spawn = ((source.get("subagent") or {}).get("thread_spawn") or {})
+        if self.thread is None:
+            self.thread = ident or self.session
+            parent = (payload.get("parent_thread_id") or spawn.get("parent_thread_id")
+                      or payload.get("forked_from_id"))
+            self.parent = str(parent) if parent else None
+            nickname = payload.get("agent_nickname") or spawn.get("agent_nickname")
+            self.nickname = (str(nickname).strip()[:80] or None) if nickname else None
+            self.forked = bool(payload.get("forked_from_id") or self.parent)
+            self.replaying = self.forked
+            self.meta_ts = parse_iso(ts) if ts else None
+            if self.nickname and not self.title:
+                self.title = self.nickname
+        self.cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+        body: dict[str, Any] = {"state": "start", "source": str(payload.get("originator") or source or "codex")[:60]}
+        if self.parent:
+            body["parent"] = self.parent
+        if self.nickname:
+            body["nickname"] = self.nickname
+        return self._blocks(line_no, [("session", body, None, None)], ts=ts)
+
+    def _own_turn(self, kind: Any, payload: dict[str, Any], ts: str | None) -> bool:
+        """Does this entry belong to the child's own first turn, ending the copy?
+
+        Thread and turn ids are UUIDv7, so every copied turn sorts below the
+        child's thread id and the child's own turns above it. A turn id from
+        an older Codex (a v4 among the v7s -- real rollouts carry one) is
+        copied history unless it is stamped well after the fork, which
+        nothing in the copy is. With a thread id that is not v7 nothing is
+        comparable, and the first turn_context ends the copy.
+        """
+        if kind not in ("turn_context", "event_msg"):
+            return False
+        turn = payload.get("turn_id")
+        if not isinstance(turn, str) or not turn:
+            return False
+        if not _is_uuid7(self.thread):
+            return kind == "turn_context"
+        if _is_uuid7(turn):
+            return turn.lower() > str(self.thread).lower()
+        stamp = parse_iso(ts) if ts else None
+        return bool(stamp and self.meta_ts and (stamp - self.meta_ts).total_seconds() >= 1.0)
 
     def _event_msg(self, line_no: int, payload: dict[str, Any], ts: str | None) -> list[dict[str, Any]]:
         kind = payload.get("type")
@@ -1081,6 +1213,14 @@ def derive_state(lane_events: list[dict[str, Any]], *, idle_marker: bool = False
 
 
 _SNAPSHOT_DROP = ("host", "machine_id", "bio", "github")
+
+
+def _package_version() -> str:
+    try:
+        from . import __version__
+        return str(__version__)
+    except Exception:
+        return ""
 
 
 def snapshot(store: Store, *, state: str, tool: dict[str, Any] | None = None,
@@ -1302,7 +1442,10 @@ def register(relay: str, join_code: str, name: str, *, harness: str | None = Non
     `owner_token` (§10.2) is present on a v1.3 relay and `None` on an older one.
     """
     room = _room_of(join_code)
-    body = {"harness": harness, "human": human, "model": model, "stream": stream}
+    body = {"harness": harness, "human": human, "model": model, "stream": stream,
+            # So whoever is watching can tell which build a machine runs; a
+            # friend's stale install is otherwise invisible until it misbehaves.
+            "version": _package_version()}
     status, _, raw = _request("POST", _url(relay, f"/r/{room}/agents/{urllib.parse.quote(name)}"),
                               data=json.dumps(body).encode("utf-8"), token=join_code, timeout=timeout)
     data = _json_body(raw)
@@ -1618,6 +1761,24 @@ def child_env(store: Store, **extra: str) -> dict[str, str]:
     return env
 
 
+def detached_kwargs() -> dict[str, Any]:
+    """Popen kwargs for a child of ours that must outlive the hook and stay unseen.
+
+    One helper for the tailer, the discovery loop, the wake listener and the
+    woken harness, so the four cannot drift. On Windows the child gets its own
+    hidden console (CREATE_NO_WINDOW) in its own process group: its children
+    inherit that console, so nothing it runs -- git, powershell, a headless
+    Codex's every tool call -- flashes a window. The detached-process flag
+    looked equivalent and was the opposite: a child with *no* console makes
+    Windows open a visible one for each console program it starts, and
+    CREATE_NO_WINDOW is ignored beside it. Elsewhere a new session is enough.
+    """
+    if os.name == "nt":
+        return {"creationflags": (getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                                  | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))}
+    return {"start_new_session": True}
+
+
 def markers_dir(store: Store) -> Path:
     path = store.home / "canvas"
     path.mkdir(parents=True, exist_ok=True)
@@ -1812,7 +1973,20 @@ def _project_dirs_for(repo_root: Path | str) -> list[Path]:
     return out
 
 
-def discover_claude_transcripts(repo_root: Path | str, hours: float = 6) -> list[tuple[str, Path]]:
+def _explainer(explain: Callable[[str], None] | None) -> Callable[[str], None] | None:
+    """Where discovery says why it rejected a candidate: the caller's sink, or
+    stderr under AGENTCOLAB_DEBUG, or nowhere."""
+    if explain is not None:
+        return explain
+    return records.eprint if os.environ.get("AGENTCOLAB_DEBUG") else None
+
+
+def _ago(mtime: float) -> str:
+    return f"{max(0.0, time.time() - mtime) / 3600:.1f}h ago"
+
+
+def discover_claude_transcripts(repo_root: Path | str, hours: float = 6, *,
+                                explain: Callable[[str], None] | None = None) -> list[tuple[str, Path]]:
     """(session id, path) for every recent Claude Code transcript started inside this checkout.
 
     Newest first. A transcript is kept when its `cwd` (the first entries that
@@ -1820,47 +1994,134 @@ def discover_claude_transcripts(repo_root: Path | str, hours: float = 6) -> list
     with no `cwd` at all is kept only when it sits in the root's own project
     directory, because the slug cannot tell a subdirectory from a sibling. A
     session from another checkout is never tailed, however new it is, and there
-    is no fallback to the newest file.
+    is no fallback to the newest file. `explain` gets one line per rejection.
     """
+    say = _explainer(explain)
     cutoff = time.time() - hours * 3600
     exact = claude_project_dir(repo_root)
     found = []
-    for directory in _project_dirs_for(repo_root):
+    directories = _project_dirs_for(repo_root)
+    for directory in directories:
         for path in directory.glob("*.jsonl"):
             with contextlib.suppress(OSError):
                 mtime = path.stat().st_mtime
                 if mtime < cutoff:
+                    if say:
+                        say(f"canvas: skip {path.name}: last written {_ago(mtime)}, more than {hours:g}h")
                     continue
                 inside = _first_cwd(path)
                 if inside:
                     if not _beneath(inside, repo_root):
+                        if say:
+                            say(f"canvas: skip {path.name}: cwd {inside} is not under {repo_root}")
                         continue
                 elif directory != exact:
+                    if say:
+                        say(f"canvas: skip {path.name}: no cwd, and {directory.name} is not the checkout's own project dir")
                     continue
                 found.append((mtime, path.stem, path))
+    if say:
+        say(f"canvas: claude: {len(directories)} project dir(s) under {CLAUDE_PROJECTS} match this checkout, "
+            f"{len(found)} transcript(s) kept")
     found.sort(reverse=True)
     return [(sid, path) for _, sid, path in found]
 
 
-def discover_rollouts(repo_root: Path | str, hours: float = 6) -> list[tuple[str, Path]]:
-    """(thread id, path) for recent Codex rollouts whose `session_meta.payload.cwd` is inside this checkout."""
+def _codex_home() -> Path:
+    env = os.environ.get("CODEX_HOME")
+    return Path(env).expanduser() if env else CODEX_SESSIONS.parent
+
+
+def codex_sessions_dir() -> Path:
+    """Where Codex writes rollouts: `$CODEX_HOME/sessions`, else `~/.codex/sessions`.
+
+    Resolved at call time, with `CODEX_SESSIONS` as the default, so the
+    variable is honoured -- Codex itself keeps everything under it -- while a
+    test can still point the constant at a fixture.
+    """
+    env = os.environ.get("CODEX_HOME")
+    return Path(env).expanduser() / "sessions" if env else CODEX_SESSIONS
+
+
+def codex_session_index() -> Path:
+    """`session_index.jsonl`: the names people give threads in Codex Desktop."""
+    return _codex_home() / "session_index.jsonl"
+
+
+def _thread_name(index: Path, thread: str) -> str | None:
+    """The newest `thread_name` the index records for `thread`, or None."""
+    name: str | None = None
+    needle = thread.encode("utf-8")
+    with contextlib.suppress(OSError):
+        with open(index, "rb") as handle:
+            for line in handle:
+                if needle not in line:
+                    continue
+                try:
+                    entry = json.loads(line.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+                if (isinstance(entry, dict) and entry.get("id") == thread
+                        and isinstance(entry.get("thread_name"), str)):
+                    name = entry["thread_name"].strip()[:200] or name
+    return name
+
+
+def discover_rollouts(repo_root: Path | str, hours: float = 6, *,
+                      explain: Callable[[str], None] | None = None) -> list[tuple[str, Path]]:
+    """(thread id, path) for recent Codex rollouts whose `session_meta.payload.cwd` is inside this checkout.
+
+    Chosen by mtime over every day folder, not by folder date: Codex Desktop
+    reopens a thread by appending to the file in the folder of the day the
+    thread was *created*, so a thread from last week being typed into right
+    now lives in last week's folder, and scanning today's and yesterday's
+    missed exactly the sessions people resume. A few thousand stats per pass
+    is cheap. `explain` gets one line per rejected candidate saying why, plus
+    what was scanned; `colab canvas tail --discover --once` prints them.
+    """
+    say = _explainer(explain)
     cutoff = time.time() - hours * 3600
-    days = []
-    for back in (0, 1):
-        stamp = datetime.fromtimestamp(time.time() - back * 86400)
-        days.append(CODEX_SESSIONS / f"{stamp.year:04d}" / f"{stamp.month:02d}" / f"{stamp.day:02d}")
+    sessions = codex_sessions_dir()
     found = []
-    for day in days:
-        if not day.is_dir():
-            continue
-        for path in day.glob("rollout-*.jsonl"):
-            with contextlib.suppress(OSError):
-                mtime = path.stat().st_mtime
-                if mtime < cutoff:
-                    continue
-                if not _beneath(_first_cwd(path), repo_root):
-                    continue
-                found.append((mtime, _rollout_thread(path), path))
+    folders: set[Path] = set()
+    seen = 0
+    try:
+        candidates = list(sessions.glob("*/*/*/rollout-*.jsonl"))
+    except OSError as exc:
+        candidates = []
+        if say:
+            say(f"canvas: cannot list {sessions}: {type(exc).__name__}")
+    for path in candidates:
+        folders.add(path.parent)
+        seen += 1
+        try:
+            mtime = path.stat().st_mtime
+            if mtime < cutoff:
+                if say:
+                    say(f"canvas: skip {path.name}: last written {_ago(mtime)}, more than {hours:g}h")
+                continue
+            inside = _first_cwd(path)
+            if inside is None:
+                if say:
+                    reason = "no cwd in its first 40 lines"
+                    try:
+                        open(path, "rb").close()
+                    except OSError as exc:
+                        reason = f"{type(exc).__name__} reading it"
+                    say(f"canvas: skip {path.name}: {reason}")
+                continue
+            if not _beneath(inside, repo_root):
+                if say:
+                    say(f"canvas: skip {path.name}: cwd {inside} is not under {repo_root}")
+                continue
+            found.append((mtime, _rollout_thread(path), path))
+        except OSError as exc:
+            if say:
+                say(f"canvas: skip {path.name}: {type(exc).__name__}")
+    if say:
+        where = sessions if sessions.is_dir() else f"{sessions} (does not exist)"
+        say(f"canvas: codex: scanned {len(folders)} day folder(s) under {where}: "
+            f"{seen} rollout(s), {len(found)} for this checkout")
     found.sort(reverse=True)
     return [(sid, path) for _, sid, path in found]
 
@@ -1873,23 +2134,69 @@ def _rollout_thread(path: Path) -> str:
 # ---------------------------------------------------------------- daemon
 
 
+def _pid_alive_tasklist(pid: int) -> bool:
+    """The slow way, for a Windows Python without ctypes.
+
+    `tasklist /FI` enumerates every process; 1-3 s is normal and its output is
+    in the OEM code page. A timeout means unknown, and unknown reads as alive:
+    a false "dead" costs a twin tailer over the same transcript and a crash
+    marker that blocks respawns for ten minutes.
+    """
+    try:
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                             capture_output=True, encoding="oem", errors="replace", timeout=5,
+                             **records.quiet_child()).stdout
+    except subprocess.TimeoutExpired:
+        return True
+    except Exception:
+        return False
+    # CSV so the pid is a whole field, not a substring of another number or
+    # of the "INFO: No tasks" line some locales print.
+    for line in out.splitlines():
+        cells = [c.strip().strip('"') for c in line.split('","')]
+        if len(cells) >= 2 and cells[1] == str(pid):
+            return True
+    return False
+
+
+def _pid_alive_nt(pid: int) -> bool:
+    """Ask the kernel: instant, locale-free, and it spawns nothing.
+
+    Every hook prompt paid two `tasklist` spawns here, a second or more of a
+    1.5 s budget, and under Defender the 5 s timeout read a live tailer as
+    dead. ERROR_ACCESS_DENIED means the process exists and is not ours;
+    STILL_ACTIVE (259) is the exit code of a process that has not exited.
+    """
+    try:
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    except Exception:
+        return _pid_alive_tasklist(pid)
+    try:
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel32.OpenProcess(0x1000, 0, pid)               # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5                     # ERROR_ACCESS_DENIED
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True                                         # unknowable: never spawn a twin
+            return code.value == 259                                # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return _pid_alive_tasklist(pid)
+
+
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if os.name == "nt":
-        # os.kill(pid, 0) terminates on Windows; ask the OS the slow way.
-        with contextlib.suppress(Exception):
-            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
-                                 capture_output=True, text=True, timeout=5,
-                                 **records.quiet_child()).stdout
-            # CSV so the pid is a whole field, not a substring of another number
-            # or of the "INFO: No tasks" line some locales print.
-            for line in out.splitlines():
-                cells = [c.strip().strip('"') for c in line.split('","')]
-                if len(cells) >= 2 and cells[1] == str(pid):
-                    return True
-            return False
-        return False
+        # os.kill(pid, 0) terminates on Windows.
+        return _pid_alive_nt(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1953,7 +2260,7 @@ def daemon_states(store: Store) -> list[dict[str, Any]]:
     with contextlib.suppress(OSError):
         for path in sorted(markers_dir(store).iterdir()):
             name = path.name
-            if name.startswith("tail-") and name.endswith(".pid") and name != "tail-discover.pid":
+            if name.startswith("tail-") and name.endswith(".pid") and name != DISCOVER_PIDFILE:
                 sid = name[len("tail-"):-len(".pid")]
             elif name.startswith("daemon-failed-"):
                 sid = name[len("daemon-failed-"):]
@@ -1991,6 +2298,10 @@ def stop_daemons(store: Store) -> int:
         if row["state"] == "running":
             write_stop_marker(store, row["sid"])
             count += 1
+    discover = _read_pid(_marker(store, DISCOVER_PIDFILE))
+    if discover and _pid_alive(discover):
+        _touch(_marker(store, DISCOVER_STOP), iso_ms())
+        count += 1
     if stop_listener(store):
         count += 1
     return count
@@ -2053,6 +2364,26 @@ def _recent_crash(pidfile: Path, marker: Path) -> bool:
     return False
 
 
+_SPAWNED: list[subprocess.Popen] = []
+
+
+def _remember(child: subprocess.Popen) -> None:
+    """Keep a spawned child so `_reap` can collect it; nothing ever waits on it."""
+    _SPAWNED.append(child)
+
+
+def _reap() -> None:
+    """Collect children of ours that have exited.
+
+    A hook or a `colab` command exits and the system reaps for it, but the
+    discovery loop and the MCP server live for the whole session, and a
+    tailer that died under one of them sat as a zombie -- which
+    os.kill(pid, 0) reports alive -- so its pidfile read as a live tailer
+    and it was never respawned. One WNOHANG poll per remembered child.
+    """
+    _SPAWNED[:] = [c for c in _SPAWNED if c.poll() is None]
+
+
 def ensure_tailer(store: Store, sid: str, transcript_path: Path | str | None = None,
                   harness: str | None = None) -> str:
     """`running` | `spawned` | `failed` | `off` — never raises, never waits.
@@ -2063,6 +2394,7 @@ def ensure_tailer(store: Store, sid: str, transcript_path: Path | str | None = N
     missing from PATH cannot break streaming.
     """
     try:
+        _reap()
         if not is_on(store):
             return "off"
         if _marker(store, "room-gone").exists():
@@ -2091,16 +2423,11 @@ def ensure_tailer(store: Store, sid: str, transcript_path: Path | str | None = N
         if harness:
             cmd += ["--harness", harness]
         env = child_env(store)
-        extra: dict[str, Any] = {}
-        if os.name == "nt":
-            extra["creationflags"] = (getattr(subprocess, "DETACHED_PROCESS", 0)
-                                      | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-        else:
-            extra["start_new_session"] = True
         with open(log, "ab") as log_fd:
             child = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                      stderr=log_fd, close_fds=True, cwd=str(store.repo_root),
-                                     env=env, **extra)
+                                     env=env, **detached_kwargs())
+        _remember(child)
         pidfile.write_text(str(child.pid), encoding="utf-8")
         with contextlib.suppress(OSError):
             _marker(store, f"daemon-failed-{sid}").unlink()
@@ -2603,37 +2930,116 @@ def answer(store: Store, target: dict[str, Any], text: str, *, timeout: float = 
 # ---------------------------------------------------------------- discovery loop
 
 
-def ensure_tailers_for_cwd(store: Store, hours: float = 6) -> list[tuple[str, str]]:
+def ensure_tailers_for_cwd(store: Store, hours: float = 6, *,
+                           explain: Callable[[str], None] | None = None) -> list[tuple[str, str]]:
     """One-shot: a tailer for every recent session of either harness on this checkout."""
     out = []
     with contextlib.suppress(Exception):
-        for sid, path in discover_claude_transcripts(store.repo_root, hours):
+        for sid, path in discover_claude_transcripts(store.repo_root, hours, explain=explain):
             out.append((sid, ensure_tailer(store, sid, path, "claude-code")))
     with contextlib.suppress(Exception):
-        for sid, path in discover_rollouts(store.repo_root, hours):
+        for sid, path in discover_rollouts(store.repo_root, hours, explain=explain):
             out.append((sid, ensure_tailer(store, sid, path, "codex")))
     return out
 
 
-def tail_discover(store: Store, *, once: bool = False) -> int:
-    """`colab canvas tail --discover`: keep one tailer per discovered session."""
-    pidfile = _marker(store, "tail-discover.pid")
-    if not _claim_pidfile(pidfile):
-        records.eprint("canvas: a discovery loop is already running for this profile")
-        return 0
-    pidfile.write_text(str(os.getpid()), encoding="utf-8")
+def ensure_discover_loop(store: Store) -> str:
+    """`running` | `spawned` | `failed` | `off` -- never raises, never waits.
+
+    For a harness without hooks the MCP server calls this once at start-up and
+    the loop, not the server, finds the session: a rollout whose first line is
+    still being written at that instant has no `cwd` yet, and one pass at that
+    moment found nothing and never looked again. The child carries this pid in
+    AGENTCOLAB_DISCOVER_PARENT and exits when it is gone, so the loop lives as
+    long as the session and no longer.
+    """
     try:
-        while True:
-            config = store.config()
-            if config.get("paused") or not isinstance(config.get("canvas"), dict):
-                break
-            ensure_tailers_for_cwd(store)
-            if once:
-                break
-            time.sleep(DISCOVER_EVERY)
-    finally:
+        _reap()
+        if not is_on(store):
+            return "off"
+        if _marker(store, "room-gone").exists():
+            return "failed"
+        pidfile = _marker(store, DISCOVER_PIDFILE)
+        if not _claim_pidfile(pidfile):
+            return "running"
+    except Exception:
+        return "failed"
+    try:
+        log = _marker(store, "tail.log")
+        with contextlib.suppress(OSError):
+            if log.exists() and log.stat().st_size > LOG_MAX:
+                log.write_text("", encoding="utf-8")
+        with contextlib.suppress(OSError):
+            _marker(store, DISCOVER_STOP).unlink()
+        env = child_env(store, AGENTCOLAB_DISCOVER_PARENT=str(os.getpid()))
+        with open(log, "ab") as log_fd:
+            child = subprocess.Popen(list(TAIL_ARGV) + ["--discover"], stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, stderr=log_fd, close_fds=True,
+                                     cwd=str(store.repo_root), env=env, **detached_kwargs())
+        _remember(child)
+        pidfile.write_text(str(child.pid), encoding="utf-8")
+        return "spawned"
+    except Exception:
         with contextlib.suppress(OSError):
             pidfile.unlink()
+        return "failed"
+
+
+def tail_discover(store: Store, *, once: bool = False, parent: int = 0) -> int:
+    """`colab canvas tail --discover`: keep one tailer per discovered session.
+
+    Started by hand, or by `ensure_discover_loop` from an MCP server that put
+    its own pid in AGENTCOLAB_DISCOVER_PARENT; the loop ends when that pid is
+    gone, when `stop-discover` appears (`colab canvas off`), or when the room
+    is left. The marker is consumed on the way out, never at start: a start-up
+    unlink erased a `colab canvas off` that landed during the child's own
+    Python start-up, and the loop then ran on. `--once` is the diagnostic
+    form: one pass that says what it saw and why it rejected each candidate,
+    and it needs no claim on the pidfile because a pass beside a running loop
+    is harmless.
+    """
+    pidfile = _marker(store, DISCOVER_PIDFILE)
+    stop = _marker(store, DISCOVER_STOP)
+    if not once:
+        holder = _read_pid(pidfile)
+        if holder and holder not in (os.getpid(), os.getppid()) and _pid_alive(holder):
+            records.eprint("canvas: a discovery loop is already running for this profile")
+            return 0
+        with contextlib.suppress(OSError):
+            pidfile.write_text(str(os.getpid()), encoding="utf-8")
+    if not parent:
+        with contextlib.suppress(ValueError):
+            parent = int(os.environ.get("AGENTCOLAB_DISCOVER_PARENT") or 0)
+
+    def finished() -> bool:
+        if stop.exists():
+            if not once:
+                records.eprint("canvas: discovery loop stopped by its marker")
+            return True
+        if _marker(store, "room-gone").exists():
+            return True
+        if parent and not _pid_alive(parent):
+            return True
+        config = store.config()
+        return bool(config.get("paused")) or not isinstance(config.get("canvas"), dict)
+
+    try:
+        while not finished():
+            ensure_tailers_for_cwd(store, explain=records.eprint if once else None)
+            if once:
+                break
+            # In slices, so a vanished parent is noticed in seconds, not in DISCOVER_EVERY.
+            for _ in range(0, DISCOVER_EVERY, 5):
+                time.sleep(5)
+                if finished():
+                    break
+    finally:
+        if not once:
+            with contextlib.suppress(OSError):
+                if _read_pid(pidfile) in (os.getpid(), 0):
+                    pidfile.unlink()
+            with contextlib.suppress(OSError):
+                stop.unlink()
     return 0
 
 

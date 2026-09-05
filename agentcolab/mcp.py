@@ -22,6 +22,7 @@ import contextlib
 import io
 import json
 import sys
+import time
 from typing import Any, Callable
 
 from . import board, chat, records, session, wire
@@ -305,17 +306,38 @@ def handle(store: Store, message: dict[str, Any]) -> dict[str, Any] | None:
     return _error(request_id, -32601, f"method not found: {method}")
 
 
+def _discovery(store: Store) -> Callable[[], None]:
+    """Keep the canvas discovery loop alive for a harness without hooks.
+
+    Codex and the other MCP harnesses have no SessionStart hook, and this
+    process lives exactly as long as their session -- so it is the one place
+    that can start the canvas tailer for them. Not a one-shot: Codex Desktop
+    starts its MCP servers while the rollout's first line is still being
+    written, and one pass at that instant found no `cwd` and never looked
+    again. The loop (`canvas tail --discover`) re-scans every 30 s and exits
+    with this process; the call is repeated on tool calls, at most once per
+    DISCOVER_EVERY, so a second Codex tab whose own server found the loop
+    already running takes it over when the first tab closes. Claude Code has
+    hooks and gets nothing from this. Suppressed and gated: an unreachable
+    relay must never stop the MCP server from serving tools.
+    """
+    last = [0.0]
+
+    def ensure() -> None:
+        with contextlib.suppress(Exception):
+            from . import canvas
+            if time.time() - last[0] < canvas.DISCOVER_EVERY:
+                return
+            last[0] = time.time()
+            if canvas.is_on(store) and str(store.config().get("harness") or "") != "claude-code":
+                canvas.ensure_discover_loop(store)
+    return ensure
+
+
 def serve(store: Store) -> int:
     """Blocking stdio loop. Newline-delimited JSON, one message per line."""
-    # Codex and the other MCP harnesses have no SessionStart hook, and this
-    # process lives exactly as long as their session -- so it is the one place
-    # that can start the canvas tailer for them. Claude Code has hooks and does
-    # not need it. Suppressed and gated: an unreachable relay must never stop
-    # the MCP server from serving tools.
-    with contextlib.suppress(Exception):
-        from . import canvas
-        if canvas.is_on(store) and str(store.config().get("harness") or "") != "claude-code":
-            canvas.ensure_tailers_for_cwd(store)
+    discover = _discovery(store)
+    discover()
     stdout = sys.stdout
     for line in sys.stdin:
         line = line.strip()
@@ -334,6 +356,8 @@ def serve(store: Store) -> int:
             continue
         if not isinstance(message, dict):
             continue
+        if message.get("method") == "tools/call":
+            discover()
         try:
             response = handle(store, message)
         except Exception as exc:

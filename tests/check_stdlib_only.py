@@ -32,6 +32,8 @@ ALLOWED = {
     # 6455 to the hosted Worker by hand, so it needs what the handshake needs.
     "base64",       # wsclient.accept_key / wsclient.connect: the Sec-WebSocket-Key and -Accept values
     "ssl",          # wsclient.connect: wss:// is TLS over the same socket
+    # Windows: asking the kernel whether a pid is alive, instead of spawning tasklist.
+    "ctypes",       # canvas._pid_alive_nt: OpenProcess / GetExitCodeProcess / CloseHandle
 }
 
 

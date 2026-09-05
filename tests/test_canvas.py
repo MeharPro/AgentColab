@@ -21,6 +21,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -30,7 +31,7 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -161,6 +162,55 @@ def codex_fixture(repo: str) -> list:
         line("event_msg", {"type": "turn_aborted", "turn_id": "t2", "reason": "interrupted"}, 18),
         line("response_item", {"type": "message", "id": "msg_3", "role": "user",
                                "content": [{"type": "input_text", "text": "<environment_context>injected</environment_context>"}]}, 19),
+    ]
+
+
+CHILD = "019f88d2-be6f-7480-99f8-1a46c4388e59"
+PARENT = "019f887f-b359-7683-85d8-23aa9baac86b"
+
+
+def codex_fork_fixture(repo: str, *, nickname: str = "Archimedes") -> list:
+    """A Codex Desktop subagent rollout, as the two on this machine are shaped.
+
+    Line 1 is the child's meta; lines 2..N are a re-serialised copy of the
+    parent's history -- the parent's own meta (twice), its prompts, answers
+    and turn_contexts, one turn id a v4 from an older Codex -- all stamped
+    within a quarter second of line 1; the child's own first turn arrives
+    seconds later with a turn id above the child's thread id.
+    """
+    t0, copy = "2026-07-22T07:55:40.756Z", "2026-07-22T07:55:40.758Z"
+    parent_turn = "019f887f-b7d7-7c73-b883-e3ce56e221fe"     # older than the child
+    old_turn = "db8c028e-26b1-4933-94e0-fb37b13830fa"        # not a v7 at all, also copied
+    own_turn = "019f88d2-bf90-79a3-b5d0-a17a18da6f73"        # newer than the child
+
+    def line(kind, payload, ts):
+        return {"timestamp": ts, "type": kind, "payload": payload}
+
+    spawn = {"parent_thread_id": PARENT, "depth": 1, "agent_path": "/root/audit",
+             "agent_nickname": nickname, "agent_role": None}
+    parent_meta = {"id": PARENT, "timestamp": "2026-07-22T06:00:00.000Z", "cwd": "/somewhere/else",
+                   "originator": "Codex Desktop", "source": "vscode"}
+    said = lambda text, phase="final_answer": {"type": "message", "role": "assistant", "phase": phase,
+                                               "content": [{"type": "output_text", "text": text}]}
+    return [
+        line("session_meta", {"id": CHILD, "timestamp": t0, "cwd": repo, "originator": "Codex Desktop",
+                              "forked_from_id": PARENT, "parent_thread_id": PARENT, "thread_source": "subagent",
+                              "agent_nickname": nickname, "source": {"subagent": {"thread_spawn": spawn}}}, t0),
+        line("session_meta", parent_meta, copy),
+        line("event_msg", {"type": "task_started", "turn_id": parent_turn}, copy),
+        line("event_msg", {"type": "user_message", "message": "parent asked this"}, copy),
+        line("turn_context", {"turn_id": parent_turn, "cwd": repo, "model": "gpt-5.5"}, copy),
+        line("response_item", said("parent answered this"), copy),
+        line("turn_context", {"turn_id": old_turn, "cwd": repo, "model": "gpt-5.5"}, copy),
+        line("event_msg", {"type": "user_message", "message": "parent asked again"}, copy),
+        line("response_item", said("parent answered again"), copy),
+        line("compacted", {"message": "", "replacement_history": []}, copy),
+        line("session_meta", parent_meta, copy),
+        line("response_item", {"type": "message", "role": "developer",
+                               "content": [{"type": "input_text", "text": "you are the child; audit the ui"}]}, copy),
+        line("event_msg", {"type": "task_started", "turn_id": own_turn}, "2026-07-22T07:55:40.858Z"),
+        line("turn_context", {"turn_id": own_turn, "cwd": repo, "model": "gpt-5.6"}, "2026-07-22T07:55:48.435Z"),
+        line("response_item", said("child did this"), "2026-07-22T07:55:54.649Z"),
     ]
 
 
@@ -608,8 +658,78 @@ class CodexParser(unittest.TestCase):
         entries[0]["payload"]["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": "parent-1", "depth": 1}}}
         _write_jsonl(self.path, entries)
         tailer = canvas.CodexTailer(self.path, session=THREAD)
-        tailer.poll()
+        events = tailer.poll()
         self.assertEqual(tailer.parent, "parent-1")
+        start = events[0]
+        self.assertEqual((start["kind"], start["body"]["state"], start["body"]["parent"]), ("session", "start", "parent-1"))
+        self.assertNotIn("nickname", start["body"])
+        plain = canvas.CodexTailer(self.path, session=THREAD)
+        _write_jsonl(self.path, codex_fixture(str(self.repo)))
+        self.assertNotIn("parent", plain.poll()[0]["body"], "additive: absent when there is no parent")
+
+    def test_a_fork_skips_the_copied_parent_history(self):
+        path = self.work / f"rollout-2026-07-22T03-55-40-{CHILD}.jsonl"
+        _write_jsonl(path, codex_fork_fixture(str(self.repo)))
+        tailer = canvas.CodexTailer(path, session=CHILD, repo_root=self.repo)
+        events = tailer.poll()
+        sessions = [e["body"] for e in events if e["kind"] == "session"]
+        starts = [b for b in sessions if b["state"] == "start" and b.get("source") != "turn"]
+        self.assertEqual(len(starts), 1, "the parent's copied metas are not this session's starts")
+        self.assertEqual((starts[0]["parent"], starts[0]["nickname"], starts[0]["source"]),
+                         (PARENT, "Archimedes", "Codex Desktop"))
+        self.assertEqual([e["kind"] for e in events if e["kind"] in ("prompt", "text")], ["text"],
+                         "the parent's prompts and answers are the parent's")
+        self.assertEqual(next(e for e in events if e["kind"] == "text")["body"]["text"], "child did this")
+        self.assertNotIn("parent asked", json.dumps(events))
+        self.assertNotIn("compact", [b["state"] for b in sessions], "the copied compaction is not ours")
+        self.assertIn("turn", [b.get("source") for b in sessions], "the child's own task_started counts")
+        self.assertEqual(tailer.model, "gpt-5.6", "the copied turn_context's model is the parent's")
+        self.assertEqual(tailer.cwd, str(self.repo), "the parent's meta must not overwrite cwd")
+        self.assertEqual((tailer.thread, tailer.parent, tailer.title, tailer.replaying),
+                         (CHILD, PARENT, "Archimedes", False))
+        # A resume of the child appends its own meta again: that is a start; a parent's is not.
+        tailer.ack()
+        _append_jsonl(path, [{"timestamp": TS, "type": "session_meta",
+                              "payload": {"id": PARENT, "cwd": "/somewhere/else", "source": "vscode"}},
+                             {"timestamp": TS, "type": "session_meta",
+                              "payload": {"id": CHILD, "cwd": str(self.repo), "originator": "Codex Desktop"}}])
+        later = tailer.poll()
+        self.assertEqual([e["body"].get("parent") for e in later], [PARENT])
+        self.assertEqual(tailer.cwd, str(self.repo))
+        # Ids that are not UUIDv7 cannot be ordered: the first turn_context ends the copy.
+        entries = codex_fork_fixture(str(self.repo))
+        for entry in entries:
+            entry["payload"]["id"] = entry["payload"]["id"].replace("-7", "-4") if entry["type"] == "session_meta" else entry["payload"].get("id")
+            if entry["payload"].get("id") is None:
+                entry["payload"].pop("id", None)
+        _write_jsonl(path, entries)
+        loose = canvas.CodexTailer(path, session=CHILD)
+        texts = [e["body"]["text"] for e in loose.poll() if e["kind"] == "text"]
+        self.assertEqual(texts, ["parent answered this", "parent answered again", "child did this"])
+
+    def test_a_thread_name_from_the_session_index_becomes_a_title(self):
+        home = self.work / "codex-home"
+        canvas.CODEX_SESSIONS, saved = home / "sessions", canvas.CODEX_SESSIONS
+        self.addCleanup(setattr, canvas, "CODEX_SESSIONS", saved)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CODEX_HOME", None)
+            _write_jsonl(home / "session_index.jsonl",
+                         [{"id": "other", "thread_name": "not this one", "updated_at": TS},
+                          {"id": THREAD, "thread_name": "port the hooks", "updated_at": TS}])
+            tailer = canvas.CodexTailer(self.path, session=THREAD, repo_root=self.repo)
+            events = tailer.poll()
+            titles = [e for e in events if e["kind"] == "session" and e["body"].get("source") == "title"]
+            self.assertEqual([t["body"]["title"] for t in titles], ["port the hooks"])
+            self.assertEqual(titles[0]["id"], records.content_id("ev", THREAD, "title", "port the hooks"))
+            self.assertEqual(tailer.title, "port the hooks")
+            self.assertTrue(tailer.ack())
+            tailer._index_checked = 0
+            self.assertEqual(tailer.poll(), [], "an unchanged index says nothing new")
+            os.environ["CODEX_HOME"] = str(self.work / "elsewhere")
+            self.assertEqual(canvas.codex_sessions_dir(), self.work / "elsewhere" / "sessions")
+            self.assertEqual(canvas.codex_session_index(), self.work / "elsewhere" / "session_index.jsonl")
+            del os.environ["CODEX_HOME"]
+            self.assertEqual(canvas.codex_sessions_dir(), home / "sessions")
 
     def test_an_image_output_is_marked_without_its_bytes(self):
         entries = codex_fixture(str(self.repo))
@@ -647,6 +767,24 @@ class Sanitise(unittest.TestCase):
         event = self.event("text", {"text": f"see /repo/checkout/a.py and {home}/.ssh/id", "final": True})
         clean = canvas.sanitise(event, "tools", self.repo)
         self.assertEqual(clean["body"]["text"], "see ./a.py and ~/.ssh/id")
+
+    def test_windows_paths_in_either_slash_and_case_are_rewritten(self):
+        # git, node and the MSYS tools print C:/Users/...; VS Code and some
+        # shells a lowercase drive; Path the backslash form. All of them carry
+        # the username, and str.replace of the Path form caught only the last.
+        rewrite = canvas._rewriter(PureWindowsPath(r"C:\Users\4dele\mehar"), home=r"C:\Users\4dele",
+                                   case_insensitive=True)
+        self.assertEqual(rewrite(r"C:\Users\4dele\mehar\src\x.py"), r".\src\x.py")
+        self.assertEqual(rewrite("C:/Users/4dele/mehar/src/x.py"), "./src/x.py")
+        self.assertEqual(rewrite(r"c:\users\4dele\mehar\src\x.py"), r".\src\x.py")
+        self.assertEqual(rewrite("C:\\Users/4dele\\mehar/mixed"), "./mixed")
+        self.assertEqual(rewrite("file:///C:/Users/4dele/.ssh/id"), "file:///~/.ssh/id")
+        self.assertEqual(rewrite(r"C:\Users\4dele\other"), r"~\other")
+        # Off Windows the comparison stays exact: /Repo is not /repo.
+        posix = canvas._rewriter(Path("/repo/checkout"), home="/Users/x", case_insensitive=False)
+        self.assertEqual(posix("see /repo/checkout/a.py and /Users/x/.ssh"), "see ./a.py and ~/.ssh")
+        self.assertEqual(posix("/REPO/CHECKOUT/a.py"), "/REPO/CHECKOUT/a.py")
+        self.assertEqual(canvas._rewriter(None, home="/")("/x"), "/x", "a home of / is never rewritten")
 
     def test_head_and_tail_truncation_records_the_size(self):
         event = self.event("text", {"text": "H" * 40000 + "T" * 40000, "final": False})
@@ -1298,9 +1436,7 @@ class Daemon(RelayCase):
                                                message={"role": "user", "content": "hi"})])
         found = canvas.discover_claude_transcripts(self.repo)
         self.assertEqual([sid for sid, _ in found], [SID])
-        sessions = self.work / "codex"
-        canvas.CODEX_SESSIONS, saved_codex = sessions, canvas.CODEX_SESSIONS
-        self.addCleanup(setattr, canvas, "CODEX_SESSIONS", saved_codex)
+        sessions = self._codex_sessions()
         today = time.strftime("%Y/%m/%d", time.localtime())
         rollout = sessions / today / f"rollout-2026-09-04T10-00-00-{THREAD}.jsonl"
         _write_jsonl(rollout, codex_fixture(str(self.repo)))
@@ -1338,9 +1474,7 @@ class Daemon(RelayCase):
         found = canvas.discover_claude_transcripts(self.repo)
         self.assertEqual({sid for sid, _ in found}, {SID, "nocwd-root", "sub-session"})
         self.assertNotEqual(found[0][0], "newer-elsewhere")
-        sessions = self.work / "codex"
-        canvas.CODEX_SESSIONS, saved_codex = sessions, canvas.CODEX_SESSIONS
-        self.addCleanup(setattr, canvas, "CODEX_SESSIONS", saved_codex)
+        sessions = self._codex_sessions()
         today = time.strftime("%Y/%m/%d", time.localtime())
         other = "11111111-2222-3333-4444-555555555555"
         sub_thread = "22222222-2222-3333-4444-555555555555"
@@ -1352,6 +1486,150 @@ class Daemon(RelayCase):
         os.utime(elsewhere, (later, later))
         rollouts = canvas.discover_rollouts(self.repo)
         self.assertEqual({sid for sid, _ in rollouts}, {THREAD, sub_thread})
+
+    def _codex_sessions(self) -> Path:
+        """Point rollout discovery at a fixture tree, with CODEX_HOME unable to redirect it."""
+        sessions = self.work / "codex"
+        canvas.CODEX_SESSIONS, saved = sessions, canvas.CODEX_SESSIONS
+        self.addCleanup(setattr, canvas, "CODEX_SESSIONS", saved)
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("CODEX_HOME", None)
+        return sessions
+
+    def test_rollouts_are_found_by_mtime_in_any_day_folder_and_rejections_are_explained(self):
+        # Codex Desktop appends a resumed thread to the file in the folder of the
+        # day it was *created*; two days of folders missed every resumed session.
+        sessions = self._codex_sessions()
+        resumed = sessions / "2026" / "07" / "22" / f"rollout-2026-07-22T03-55-40-{THREAD}.jsonl"
+        _write_jsonl(resumed, codex_fixture(str(self.repo)))
+        today = time.strftime("%Y/%m/%d", time.localtime())
+        stale = sessions / today / "rollout-2026-09-04T10-00-01-11111111-2222-3333-4444-555555555555.jsonl"
+        _write_jsonl(stale, codex_fixture(str(self.repo)))
+        then = time.time() - 7 * 3600
+        os.utime(stale, (then, then))
+        elsewhere = sessions / today / "rollout-2026-09-04T10-00-02-22222222-2222-3333-4444-555555555555.jsonl"
+        _write_jsonl(elsewhere, codex_fixture("/somewhere/else"))
+        nocwd = sessions / today / "rollout-2026-09-04T10-00-03-33333333-2222-3333-4444-555555555555.jsonl"
+        _write_jsonl(nocwd, [{"timestamp": TS, "type": "event_msg", "payload": {"type": "task_started"}}])
+        lines = []
+        found = canvas.discover_rollouts(self.repo, explain=lines.append)
+        self.assertEqual([sid for sid, _ in found], [THREAD])
+        text = "\n".join(lines)
+        self.assertRegex(text, rf"skip {re.escape(stale.name)}: last written 7\.\dh ago, more than 6h")
+        self.assertIn(f"skip {elsewhere.name}: cwd /somewhere/else is not under {self.repo}", text)
+        self.assertIn(f"skip {nocwd.name}: no cwd in its first 40 lines", text)
+        self.assertIn(f"scanned 2 day folder(s) under {sessions}: 4 rollout(s), 1 for this checkout", text)
+        self.assertNotIn(resumed.name, text, "kept candidates are not complained about")
+        self.assertEqual(canvas.discover_rollouts(self.repo, explain=None), found, "silent by default")
+        # `colab canvas tail --discover --once` is the diagnostic form and prints the reasons.
+        err = io.StringIO()
+        with mock.patch.object(canvas, "ensure_tailer", return_value="running") as ensure, \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(canvas.tail_discover(self.store, once=True), 0)
+        self.assertEqual([c.args[1] for c in ensure.call_args_list], [THREAD])
+        self.assertIn("4 rollout(s), 1 for this checkout", err.getvalue())
+        self.assertIn("project dir(s) under", err.getvalue())
+        self.assertFalse(canvas._marker(self.store, canvas.DISCOVER_PIDFILE).exists(), "--once claims nothing")
+
+    def test_the_discovery_loop_ends_with_its_parent_and_on_the_stop_marker(self):
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        with mock.patch.object(canvas, "ensure_tailers_for_cwd", return_value=[]) as passes:
+            start = time.time()
+            self.assertEqual(canvas.tail_discover(self.store, parent=gone.pid), 0)
+            with mock.patch.dict(os.environ, {"AGENTCOLAB_DISCOVER_PARENT": str(gone.pid)}):
+                self.assertEqual(canvas.tail_discover(self.store), 0)
+            self.assertLess(time.time() - start, 3.0, "a finished loop must not sleep first")
+            passes.assert_not_called()
+        # `colab canvas off` writes the stop marker while the loop is alive: the
+        # next slice sees it and the loop consumes it on the way out -- never at
+        # start, or an `off` during the child's own start-up would be erased.
+        stop = canvas._marker(self.store, canvas.DISCOVER_STOP)
+        with mock.patch.object(canvas, "ensure_tailers_for_cwd",
+                               side_effect=lambda store, **kw: canvas._touch(stop, "x") or []) as passes, \
+                mock.patch.object(canvas.time, "sleep") as sleep, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(canvas.tail_discover(self.store, parent=os.getpid()), 0)
+        self.assertEqual(passes.call_count, 1, "one pass, then the marker ends it")
+        self.assertTrue(sleep.called)
+        self.assertFalse(stop.exists(), "the marker is consumed")
+        self.assertFalse(canvas._marker(self.store, canvas.DISCOVER_PIDFILE).exists())
+        canvas._touch(stop, "x")
+        with mock.patch.object(canvas, "ensure_tailers_for_cwd", return_value=[]) as passes, \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(canvas.tail_discover(self.store, parent=os.getpid()), 0)
+        passes.assert_not_called()
+        self.assertFalse(stop.exists(), "a marker that was already there is honoured, then consumed")
+
+    def test_ensure_discover_loop_spawns_once_and_stop_daemons_ends_it(self):
+        self.assertEqual(canvas.ensure_discover_loop(self.store), "spawned")
+        pidfile = canvas._marker(self.store, canvas.DISCOVER_PIDFILE)
+        pid = int(pidfile.read_text(encoding="utf-8"))
+        self.addCleanup(lambda: subprocess.run(["kill", "-9", str(pid)], capture_output=True))
+        child = next(c for c in canvas._SPAWNED if c.pid == pid)
+        self.assertTrue(canvas._pid_alive(pid), "the loop died at once: " + self._log())
+        self.assertEqual(canvas.ensure_discover_loop(self.store), "running")
+        self.assertGreaterEqual(canvas.stop_daemons(self.store), 1, "`colab canvas off` counts the loop")
+        try:
+            child.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            self.fail("the loop ignored the stop marker: " + self._log())
+        self.assertFalse(canvas._pid_alive(pid))
+        self.assertFalse(pidfile.exists())
+        self.assertFalse(canvas._marker(self.store, canvas.DISCOVER_STOP).exists())
+        self.assertIn("stopped by its marker", self._log())
+
+    def test_a_discovery_loop_follows_the_mcp_server_that_spawned_it(self):
+        """Spawned from a parent that exits at once, as an MCP server does when
+        Codex closes the tab: the loop must notice and go, not run on for ever."""
+        code = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "from agentcolab import canvas\n"
+            "from agentcolab.store import Store\n"
+            f"store = Store(root={str(self.repo)!r})\n"
+            "print(canvas.ensure_discover_loop(store), canvas.ensure_discover_loop(store))\n"
+        )
+        env = {**os.environ, "PYTHONPATH": str(ROOT)}
+        parent = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=20, env=env, text=True)
+        self.assertEqual(parent.stdout.split(), ["spawned", "running"], parent.stderr)
+        pidfile = canvas._marker(self.store, canvas.DISCOVER_PIDFILE)
+        pid = int(pidfile.read_text(encoding="utf-8"))
+        self.addCleanup(lambda: subprocess.run(["kill", "-9", str(pid)], capture_output=True))
+        deadline = time.time() + 12
+        while time.time() < deadline and canvas._pid_alive(pid):
+            time.sleep(0.1)
+        self.assertFalse(canvas._pid_alive(pid), "the loop outlived its parent: " + self._log())
+        self.assertFalse(pidfile.exists())
+
+    def test_mcp_serve_keeps_the_discovery_loop_alive_for_a_harness_without_hooks(self):
+        from agentcolab import mcp
+        config = self.store.config()
+        config["harness"] = "codex"
+        self.store.save_config(config)
+        calls = []
+        lines = [json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+                 json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "nope"}}),
+                 json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "nope"}})]
+        out = io.StringIO()
+        with mock.patch.object(canvas, "ensure_discover_loop", side_effect=lambda store: calls.append(1) or "spawned"), \
+                mock.patch.object(canvas, "DISCOVER_EVERY", 0), \
+                mock.patch.object(sys, "stdin", io.StringIO("\n".join(lines) + "\n")), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(mcp.serve(self.store), 0)
+        self.assertEqual(len(calls), 3, "once at start, then per tool call once DISCOVER_EVERY has passed")
+        self.assertEqual(out.getvalue().count('"jsonrpc"'), 3, "the tools were still served")
+        self.assertNotIn("ensure_tailers_for_cwd", (ROOT / "agentcolab" / "mcp.py").read_text(encoding="utf-8"),
+                         "the one-shot pass at start-up is what missed the session")
+        config["harness"] = "claude-code"
+        self.store.save_config(config)
+        calls.clear()
+        with mock.patch.object(canvas, "ensure_discover_loop", side_effect=lambda store: calls.append(1)), \
+                mock.patch.object(sys, "stdin", io.StringIO(lines[1] + "\n")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            mcp.serve(self.store)
+        self.assertEqual(calls, [], "Claude Code has hooks and gets nothing from this")
 
     def test_stop_daemons_also_stops_the_wake_listener(self):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
@@ -1434,9 +1712,28 @@ class Structural(unittest.TestCase):
 
     def test_the_spawn_is_detached_and_quiet(self):
         body = self.source[self.source.index("def ensure_tailer("):self.source.index("def _lane_of(")]
-        for needle in ("stdin=subprocess.DEVNULL", "stdout=subprocess.DEVNULL", "start_new_session",
-                       "close_fds=True", "child_env(store)", "creationflags"):
+        for needle in ("stdin=subprocess.DEVNULL", "stdout=subprocess.DEVNULL", "close_fds=True",
+                       "child_env(store)", "**detached_kwargs()"):
             self.assertIn(needle, body)
+        loop = self.source[self.source.index("def ensure_discover_loop("):self.source.index("def tail_discover(")]
+        for needle in ("stdin=subprocess.DEVNULL", "stdout=subprocess.DEVNULL", "**detached_kwargs()"):
+            self.assertIn(needle, loop)
+        # One helper decides how a child of ours is detached, so the tailer, the
+        # discovery loop, the listener and the woken harness cannot drift. On
+        # Windows it is CREATE_NO_WINDOW in a new process group: the detached-
+        # process flag gave the child no console, so every console program it
+        # ran flashed a fresh visible one, and CREATE_NO_WINDOW is ignored
+        # beside it.
+        helper = self.source[self.source.index("def detached_kwargs("):self.source.index("def markers_dir(")]
+        for needle in ("CREATE_NO_WINDOW", "CREATE_NEW_PROCESS_GROUP", "start_new_session"):
+            self.assertIn(needle, helper)
+        wake_src = (ROOT / "agentcolab" / "wake.py").read_text(encoding="utf-8")
+        for source in (self.source, wake_src):
+            self.assertNotIn("DETACHED" + "_PROCESS", source)
+        self.assertEqual(wake_src.count("**canvas.detached_kwargs()"), 2, "the listener and the woken harness")
+        self.assertNotIn("quiet_child(), **", wake_src, "a merge that let one creationflags overwrite the other")
+        self.assertEqual(canvas.detached_kwargs(),
+                         {"creationflags": 0x08000000 | 0x00000200} if os.name == "nt" else {"start_new_session": True})
         # The profile and the import path ride in child_env, so both spawns
         # (tailer here, listener in wake.py) get them from one place.
         env_body = self.source[self.source.index("def child_env("):self.source.index("def markers_dir(")]
@@ -1469,6 +1766,58 @@ class Structural(unittest.TestCase):
         ws_src = (ROOT / "agentcolab" / "wsclient.py").read_text(encoding="utf-8")
         for banned in ("import threading", "import http", "import select", "from . import"):
             self.assertNotIn(banned, ws_src)
+
+
+class WindowsProcessProbe(unittest.TestCase):
+    """_pid_alive on Windows asks the kernel; tasklist is the fallback; unknown is never dead."""
+
+    def _kernel(self, *, handle, exit_code=259, last_error=0, exit_ok=True):
+        import ctypes
+        k32 = mock.Mock()
+        k32.OpenProcess.return_value = handle
+
+        def get_exit(_handle, out):
+            out._obj.value = exit_code
+            return 1 if exit_ok else 0
+        k32.GetExitCodeProcess.side_effect = get_exit
+        for patch in (mock.patch.object(ctypes, "WinDLL", create=True, return_value=k32),
+                      mock.patch.object(ctypes, "get_last_error", create=True, return_value=last_error)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        return k32
+
+    def test_open_process_and_the_exit_code_decide(self):
+        k32 = self._kernel(handle=0x1234, exit_code=259)                  # STILL_ACTIVE
+        self.assertTrue(canvas._pid_alive_nt(4242))
+        k32.OpenProcess.assert_called_once_with(0x1000, 0, 4242)          # PROCESS_QUERY_LIMITED_INFORMATION
+        k32.CloseHandle.assert_called_once_with(0x1234)
+        self._kernel(handle=0x1234, exit_code=0)
+        self.assertFalse(canvas._pid_alive_nt(4242), "exited, handle still open somewhere")
+        self._kernel(handle=0, last_error=5)                              # ERROR_ACCESS_DENIED: someone else's, alive
+        self.assertTrue(canvas._pid_alive_nt(4242))
+        self._kernel(handle=0, last_error=87)                             # ERROR_INVALID_PARAMETER: no such pid
+        self.assertFalse(canvas._pid_alive_nt(4242))
+        self._kernel(handle=0x1234, exit_ok=False)
+        self.assertTrue(canvas._pid_alive_nt(4242), "unknowable reads as alive: a twin tailer is the worse error")
+
+    def test_tasklist_fallback_reads_oem_and_a_timeout_is_alive(self):
+        with mock.patch.object(canvas.subprocess, "run", side_effect=subprocess.TimeoutExpired("tasklist", 5)):
+            self.assertTrue(canvas._pid_alive_tasklist(4242))
+        done = subprocess.CompletedProcess([], 0, stdout='"python.exe","4242","Console","1","10 K"\n', stderr="")
+        with mock.patch.object(canvas.subprocess, "run", return_value=done) as run:
+            self.assertTrue(canvas._pid_alive_tasklist(4242))
+            self.assertFalse(canvas._pid_alive_tasklist(42421), "a pid that is a substring of another")
+            kwargs = run.call_args.kwargs
+            self.assertEqual((kwargs.get("encoding"), kwargs.get("errors")), ("oem", "replace"))
+            self.assertNotIn("text", kwargs)
+        nothing = subprocess.CompletedProcess([], 0, stdout="INFO: Es werden keine Aufgaben\ufffd ausgef\ufffdhrt.\n", stderr="")
+        with mock.patch.object(canvas.subprocess, "run", return_value=nothing):
+            self.assertFalse(canvas._pid_alive_tasklist(4242))
+        with mock.patch.object(canvas, "_pid_alive_nt", return_value=True) as probe, \
+                mock.patch.object(canvas.os, "name", "nt"):
+            self.assertTrue(canvas._pid_alive(7))
+            self.assertFalse(canvas._pid_alive(0))
+            probe.assert_called_once_with(7)
 
 
 # ---------------------------------------------------------------- v1.3: join, export, briefing
@@ -1757,6 +2106,25 @@ class Wake(RelayCase):
                          "When in doubt, answer and stop."):
             self.assertIn(sentence, docs)
 
+    def test_a_hookless_harness_wakes_even_while_a_session_runs(self):
+        """Claude Code's running session sees a ping at its next prompt (hook), so
+        `busy` is right there. Codex has no hooks: a running thread never learns
+        of the ping, so the only automatic path is a new headless session."""
+        from agentcolab import wake
+        config = {"enabled": True, "from": "room", "max_per_hour": 4}
+        message = {"id": "cm-test-1", "to": self.store.agent, "kind": "ping", "text": "look",
+                   "from": {"kind": "agent", "name": "bob-codex"}}
+        saved = self.store.config()
+        try:
+            self.store.save_config({**saved, "harness": "claude-code"})
+            self.assertEqual(wake.decide(self.store, message, config, used=0, running=True)[0], "busy")
+            self.store.save_config({**saved, "harness": "codex"})
+            self.assertEqual(wake.decide(self.store, message, config, used=0, running=True)[0], "woke")
+            self.assertEqual(wake.decide(self.store, message, config, used=4, running=True),
+                             ("busy", "hourly cap"))
+        finally:
+            self.store.save_config(saved)
+
     def test_listener_decides_and_acks_against_the_relay(self):
         listener = wake.Listener(self.store, log=lambda line: None)
         self.assertEqual(listener.handle({"t": "wake", "message": None,
@@ -1766,9 +2134,10 @@ class Wake(RelayCase):
         canvas._pidfile(self.store, SID).write_text(str(os.getpid()), encoding="utf-8")
         self.assertEqual(listener.handle({"t": "wake", "message": _message(id="cm-k7mq-1"), "settings": {}}), "busy")
         canvas._pidfile(self.store, SID).unlink()
-        stand_in = [sys.executable, "-c", "import sys; print('woken with', len(sys.argv), 'args')"]
+        stand_in = [sys.executable, "-c", "import sys; print('woken', 'with', len(sys.argv), 'args and',"
+                                          " len(sys.stdin.read()), 'bytes on stdin')"]
         saved = wake.harness_argv
-        wake.harness_argv = lambda harness, text: stand_in + [text]
+        wake.harness_argv = lambda harness, text=None: list(stand_in)
         self.addCleanup(setattr, wake, "harness_argv", saved)
         self.assertEqual(listener.handle({"t": "wake", "message": _message(id="cm-k7mq-2"), "settings": {}}), "woke")
         self.assertEqual(wake.used_this_hour(self.store), 1)
@@ -1787,8 +2156,96 @@ class Wake(RelayCase):
         deadline = time.time() + 5
         while time.time() < deadline and "woken with" not in log.read_text(encoding="utf-8"):
             time.sleep(0.05)
-        # `python -c code <prompt>` sees argv ['-c', '<prompt>']: the prompt reached the harness.
-        self.assertIn("woken with 2 args", log.read_text(encoding="utf-8"), "the harness was started detached")
+        # `python -c code` sees argv ['-c']: nothing but the command, and the prompt came in on stdin.
+        seen = re.search(r"woken with 1 args and (\d+) bytes on stdin", log.read_text(encoding="utf-8"))
+        self.assertTrue(seen, "the harness was started detached: " + log.read_text(encoding="utf-8")[-300:])
+        self.assertGreater(int(seen.group(1)), len(wake.PROMPT_INTRO), "the prompt reached the harness")
+        self.assertTrue((log.parent / "cm-k7mq-2.prompt").exists())
+
+    def test_the_prompt_travels_on_stdin_never_in_argv(self):
+        # The message is the one string here a stranger typed, and on Windows the
+        # harness is an npm .cmd that CreateProcess hands to cmd.exe, which does not
+        # read list2cmdline quoting: this text in argv ran `calc.exe` on the woken machine.
+        canvas.save_wake_settings(self.store, enabled=True, **{"from": "room"})
+        hostile = 'fix the bug" & calc.exe & echo "'
+        message = _message(id="cm-k7mq-77", text=hostile)
+        spawned = []
+
+        class Child:
+            pid = 4242
+
+            def poll(self):
+                return 0
+
+        def fake_popen(argv, **kwargs):
+            spawned.append((list(argv), kwargs))
+            return Child()
+
+        for harness, name, tail in (("claude-code", "claude", ["-p"]), ("codex", "codex", ["exec", "-"])):
+            config = self.store.config()
+            config["harness"] = harness
+            self.store.save_config(config)
+            with mock.patch.object(wake.subprocess, "Popen", side_effect=fake_popen), \
+                    mock.patch.object(wake.shutil, "which", side_effect=lambda binary: f"/fake/bin/{binary}.cmd"):
+                ok, detail = wake.start_session(self.store, message, wake.settings(self.store), used=1)
+            self.assertTrue(ok, detail)
+            argv, kwargs = spawned[-1]
+            self.assertEqual(argv, [f"/fake/bin/{name}.cmd"] + tail, "which() resolves the .cmd shim; argv is fixed text")
+            self.assertNotIn("calc.exe", " ".join(argv))
+            self.assertNotIn(wake.PROMPT_INTRO[:30], " ".join(argv))
+            stdin = kwargs["stdin"]
+            self.assertTrue(stdin.closed, "the listener does not hold the prompt open")
+            self.assertEqual(Path(stdin.name).name, "cm-k7mq-77.prompt")
+            body = Path(stdin.name).read_text(encoding="utf-8")
+            self.assertEqual(body, wake.prompt(message, wake.settings(self.store), me="alice-claude-code", used=1))
+            self.assertIn(hostile, body)
+            self.assertTrue(kwargs.get("start_new_session") or kwargs.get("creationflags"))
+            self.assertEqual(kwargs["cwd"], str(self.store.repo_root))
+            self.assertIn(f"{name} {' '.join(tail)} < cm-k7mq-77.prompt", detail)
+        header = (canvas.markers_dir(self.store) / wake.LOG_DIR / "cm-k7mq-77.log").read_text(encoding="utf-8")
+        self.assertNotIn("calc.exe", header)
+        with mock.patch.object(wake.shutil, "which", return_value=None):
+            self.assertEqual(wake.start_session(self.store, message, wake.settings(self.store)),
+                             (False, "codex is not on PATH"))
+        ok, detail = wake.start_session(self.store, message, wake.settings(self.store), dry_run=True)
+        self.assertTrue(ok)
+        self.assertIn("codex exec - < cm-k7mq-77.prompt", detail)
+        self.assertNotIn(hostile, detail)
+        directory = canvas.markers_dir(self.store) / wake.LOG_DIR
+        wake._prune_logs(directory, cap=0)
+        self.assertEqual(list(directory.glob("*.prompt")) + list(directory.glob("*.log")), [],
+                         "prompt files are pruned with the logs")
+
+    def test_login_items_carry_pythonpath_and_windows_gets_a_cmd(self):
+        # A login item starts `python -m agentcolab` from a shell that has none of
+        # the launcher's sys.path fix-up; without PYTHONPATH a git-clone install dies
+        # with "No module named agentcolab" and `colab wake on --at-login` installs a
+        # listener that never runs. schtasks cannot nest quotes, so Windows gets a .cmd.
+        with mock.patch.object(wake.platform, "system", return_value="Windows"):
+            lines = wake.install_login_item(self.store)
+            path = wake.login_item_path(self.store)
+            self.assertEqual(path, canvas.markers_dir(self.store) / "wake-listener.cmd")
+            text = path.read_text(encoding="utf-8")
+            for needle in (f'set "PYTHONPATH={canvas.PACKAGE_PARENT}"', f'set "AGENTCOLAB_PROFILE={self.store.profile}"',
+                           f'cd /d "{self.store.repo_root}"', f'"{sys.executable}" -m agentcolab wake serve'):
+                self.assertIn(needle, text)
+            self.assertIn(b"\r\n", path.read_bytes(), "cmd.exe wants CRLF; read_text() would have hidden it")
+            self.assertIn(f'schtasks /Create /SC ONLOGON /TN AgentColabWake /TR "{path}"', lines[-1])
+            self.assertNotIn('""', lines[-1], "nested quotes ended /TR at the empty string")
+            self.assertTrue(wake.status(self.store)["login_item"])
+            removed = wake.remove_login_item(self.store)
+            self.assertFalse(path.exists())
+            self.assertIn("schtasks /Delete", removed[-1])
+        if not hasattr(os, "getuid"):
+            return
+        for system, shape in (("Darwin", "<key>PYTHONPATH</key><string>%s</string>"),
+                              ("Linux", 'Environment="PYTHONPATH=%s"')):
+            target = self.work / f"login-item-{system}"
+            with mock.patch.object(wake.platform, "system", return_value=system), \
+                    mock.patch.object(wake, "login_item_path", return_value=target), \
+                    mock.patch.object(wake.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+                wake.install_login_item(self.store)
+            self.assertIn(shape % canvas.PACKAGE_PARENT, target.read_text(encoding="utf-8"), system)
 
     def test_serve_once_reads_the_stream_acks_and_pulls_the_inbox(self):
         FakeRelay.stream_frames = [{"t": "wake", "rseq": 9, "message": _message(id="cm-k7mq-9"), "settings": {}}]
