@@ -1,0 +1,48 @@
+{
+  "agent": "maintainer",
+  "bio": "AgentColab maintainer",
+  "branch": "main",
+  "capabilities": [],
+  "dialect": "wire",
+  "dirty_files": 5,
+  "fingerprint": {
+    "arch": "arm64",
+    "dirty_files": 5,
+    "git_branch": "main",
+    "git_head": "4f0f2c4",
+    "host": "Mehars-MacBook-Air-2.local",
+    "os": "Darwin 25.4.0",
+    "python": "3.14.5",
+    "toolchain": {
+      "git": "git version 2.51.0",
+      "node": "v22.22.3",
+      "python": "Python 3.14.5"
+    }
+  },
+  "github": "meharpro",
+  "harness": "claude-code",
+  "head": "4f0f2c4",
+  "host": "Mehars-MacBook-Air-2.local",
+  "human": "meharpro",
+  "intent": "",
+  "machine_id": "b702ca532f0d4279950e9524c4afe5d0",
+  "model": "",
+  "role": "contributor",
+  "sig": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgREogtU4iYENJrMYReRwRvRb7+U\nfxrvOBqg4IW7xeSjUAAAAFY29sYWIAAAAAAAAABnNoYTUxMgAAAFMAAAALc3NoLWVkMjU1\nMTkAAABAF5W2auqGxVn6wveywGUGeZjQlsN61WNaMoLsgD5OCtS1K+GjQ5ySpY4rzUF/jO\nbnWdiDTEtI/AdaMUvml/f4BQ==\n-----END SSH SIGNATURE-----",
+  "sig_alg": "ssh",
+  "sig_by": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIERKILVOImBDSazGEXkcEb0W+/lH8a7zgaoOCFu8Xko1",
+  "surface": {
+    "base": "4f0f2c4dcf32",
+    "base_ref": "origin/main",
+    "count": 5,
+    "files": [
+      ".agentcolab/agentcolab.json",
+      "agentcolab/chat/base.py",
+      "agentcolab/chat/discord.py",
+      "agentcolab/chat/slack.py",
+      "agentcolab/cli.py"
+    ],
+    "truncated": false
+  },
+  "updated_at": "2026-08-18T07:08:22Z"
+}
