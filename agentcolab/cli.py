@@ -279,7 +279,7 @@ def _join_canvas(store: Store) -> None:
             started = canvas.ensure_tailers_for_cwd(store)
             print()
             print(f"canvas    {canvas.viewer_url(relay, str(cfg.get('room')))}"
-                  f"  ({len(started)} session(s) streaming)")
+                  f"  ({len(started)} session(s) streaming)" + ("" if started else " — run `colab canvas tail --discover --once` to see why"))
             return
         if not cfg.get("join_code"):
             if cfg.get("room"):
@@ -440,6 +440,11 @@ def _canvas_keepalive(store: Store) -> None:
         from . import canvas
         if canvas.is_on(store):
             canvas.ensure_tailers_for_cwd(store)
+            # A harness without hooks (Codex) has no other moment at which the
+            # room reaches it: whatever `colab` command its agent runs is the
+            # one that must pull the asks and pings. Bounded, never raises.
+            with contextlib.suppress(Exception):
+                session.pull_inbox(store, timeout=3)
             # Answers spooled while no session was running have no daemon to
             # drain them; every sync and status is one.
             canvas.flush_spools(store, timeout=3)
@@ -812,17 +817,29 @@ def cmd_answer(store: Store, args: argparse.Namespace) -> int:
     return _ok("answered in chat")
 
 
+def _print_room_mail(rooms: list[dict[str, Any]]) -> None:
+    print(chat.UNTRUSTED_BANNER)
+    print()
+    for msg in rooms:
+        kind = str(msg.get("kind") or "chat")
+        flag = "  NEEDS REPLY" if msg.get("needs_reply") else ""
+        print(f"{msg.get('id')}  [{kind}] {msg.get('agent')}{flag}  {ago(msg.get('ts'))}")
+        print(records.frame_untrusted(str(msg.get("body"))[:600]))
+    print()
+    print("Reply with `colab answer <id> \"...\"` — it goes back to the room they asked in.")
+
+
 def cmd_inbox(store: Store, args: argparse.Namespace) -> int:
+    # The room is the other half of the inbox. Codex learned this the hard way:
+    # a ping sat on the canvas while `colab inbox` said "inbox clear", because
+    # only `sync` pulled the room and only `--chat` showed it. Pull it here,
+    # list it here.
+    _canvas_keepalive(store)
+    rooms = session.chat_unread(store)
     if args.chat:
-        rooms = session.chat_unread(store)
         if not rooms:
             return _ok("no unread chat messages")
-        print(chat.UNTRUSTED_BANNER)
-        print()
-        for msg in rooms:
-            print(f"{msg.get('id')}  [{msg.get('channel')}] {msg.get('agent')} "
-                  f"{ago(msg.get('ts'))}")
-            print(records.frame_untrusted(str(msg.get("body"))[:600]))
+        _print_room_mail(rooms)
         return 0
     mail = session.unread(store)
     # A project that set a minimum trust level meant it. Records below it are
@@ -833,7 +850,13 @@ def cmd_inbox(store: Store, args: argparse.Namespace) -> int:
         mail, withheld = classified, []
     else:
         mail, withheld = session.below_minimum(store, classified)
+    if rooms and not args.wire:
+        _print_room_mail(rooms)
+        if mail:
+            print()
     if not mail:
+        if rooms:
+            return 0
         if withheld:
             return _ok(f"inbox clear ({len(withheld)} held below "
                        f"{session.require_trust(store)} — `colab inbox --all` to see them)")
@@ -2367,7 +2390,7 @@ def cmd_canvas(store: Store | None, args: argparse.Namespace) -> int:
         if not args.session:
             started = canvas.ensure_tailers_for_cwd(store)
             if not started:
-                eprint("colab: no live session found for this checkout.")
+                eprint("colab: no live session found for this checkout — run `colab canvas tail --discover --once` to see why.")
                 eprint("     Pass --session and --transcript, or --discover.")
                 return 1
             return _ok(f"streaming {len(started)} session(s)")
