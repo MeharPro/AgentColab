@@ -95,8 +95,7 @@ def git(args: list[str], cwd: Path, *, check: bool = True, timeout: int = 60,
         proc = subprocess.run(
             ["git", *args], cwd=str(cwd), capture_output=True, timeout=timeout,
             env=env, input=stdin_bytes,
-            stdin=None if stdin_bytes is not None else subprocess.DEVNULL,
-        )
+            stdin=None if stdin_bytes is not None else subprocess.DEVNULL, **records.quiet_child())
     except subprocess.TimeoutExpired:
         raise LinkError(f"git {' '.join(args[:2])} timed out after {timeout}s")
     except OSError as exc:

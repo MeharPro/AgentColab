@@ -383,12 +383,26 @@ def path_matches(path: str, patterns: Iterable[str]) -> str | None:
 # ------------------------------------------------------- machine fingerprint
 
 
+def quiet_child() -> dict[str, Any]:
+    """Popen/run kwargs so a child never opens a console window.
+
+    On Windows a process that has no console of its own -- the canvas tailer
+    and the wake listener are started detached, so they have none -- gets a
+    brand-new console for every console program it runs. That was `git` and
+    `tasklist` every thirty seconds, each flashing a black window over
+    whatever the person was doing, until the machine was unusable. On every
+    other platform this is empty.
+    """
+    if os.name != "nt":
+        return {}
+    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+
+
 def run(cmd: Sequence[str], timeout: int = 8, cwd: str | Path | None = None) -> str:
     try:
         proc = subprocess.run(
             list(cmd), capture_output=True, text=True, timeout=timeout,
-            cwd=str(cwd) if cwd else None, stdin=subprocess.DEVNULL,
-        )
+            cwd=str(cwd) if cwd else None, stdin=subprocess.DEVNULL, **quiet_child())
         return (proc.stdout or "").strip()
     except (OSError, subprocess.SubprocessError):
         return ""

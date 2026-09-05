@@ -86,6 +86,12 @@ CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 # must not be able to break streaming. A module constant so a test can point it
 # at `-m agentcolab.canvas` until the CLI verb exists.
 TAIL_ARGV = [sys.executable, "-m", "agentcolab", "canvas", "tail"]
+# `-m agentcolab` resolves the package from the child's sys.path, and a child
+# started in somebody's checkout has that checkout on its path, not this one.
+# A git-clone install -- the installer's layout, and every friend's machine --
+# is importable only through the launcher's own path fix-up, so the child was
+# dying with "No module named agentcolab" in every repository but this one.
+PACKAGE_PARENT = str(Path(__file__).resolve().parents[1])
 
 # Where `colab canvas new` and `colab canvas join` go when neither --relay nor
 # the project's config names one. A placeholder until the maintainer deploys
@@ -1603,6 +1609,15 @@ def save_wake_settings(store: Store, **changes: Any) -> dict[str, Any]:
     return wake_settings(store)
 
 
+def child_env(store: Store, **extra: str) -> dict[str, str]:
+    """The environment for a detached child of ours: the profile, and a sys.path
+    that can find this package from any working directory."""
+    env = {**os.environ, "AGENTCOLAB_PROFILE": store.profile, **extra}
+    prior = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = PACKAGE_PARENT + (os.pathsep + prior if prior else "")
+    return env
+
+
 def markers_dir(store: Store) -> Path:
     path = store.home / "canvas"
     path.mkdir(parents=True, exist_ok=True)
@@ -1864,9 +1879,16 @@ def _pid_alive(pid: int) -> bool:
     if os.name == "nt":
         # os.kill(pid, 0) terminates on Windows; ask the OS the slow way.
         with contextlib.suppress(Exception):
-            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True,
-                                 text=True, timeout=5).stdout
-            return str(pid) in out
+            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                                 capture_output=True, text=True, timeout=5,
+                                 **records.quiet_child()).stdout
+            # CSV so the pid is a whole field, not a substring of another number
+            # or of the "INFO: No tasks" line some locales print.
+            for line in out.splitlines():
+                cells = [c.strip().strip('"') for c in line.split('","')]
+                if len(cells) >= 2 and cells[1] == str(pid):
+                    return True
+            return False
         return False
     try:
         os.kill(pid, 0)
@@ -2000,6 +2022,37 @@ def stop_listener(store: Store) -> bool:
     return True
 
 
+CRASH_WINDOW = 60       # a daemon gone within this many seconds of its spawn crashed
+CRASH_BACKOFF = 600     # and is not respawned for this long
+
+
+def _recent_crash(pidfile: Path, marker: Path) -> bool:
+    """Did the last daemon die young, and is it too soon to try again?
+
+    A pidfile whose pid is dead but whose mtime is under a minute old means the
+    child started and exited straight away (the log has the reason). Record
+    that in the failed-marker and hold off; a marker older than the back-off
+    clears itself so a fixed install recovers without anyone deleting files.
+    """
+    now = time.time()
+    with contextlib.suppress(OSError):
+        if marker.exists():
+            text = marker.read_text(encoding="utf-8")
+            if text.startswith("crashed") and now - marker.stat().st_mtime < CRASH_BACKOFF:
+                return True
+    with contextlib.suppress(OSError):
+        if pidfile.exists():
+            pid = _read_pid(pidfile)
+            age = now - pidfile.stat().st_mtime
+            if pid and not _pid_alive(pid) and age < CRASH_WINDOW:
+                marker.write_text("crashed: the daemon exited within a minute of starting -- "
+                                  "see tail.log beside this file; retried in 10 minutes",
+                                  encoding="utf-8")
+                pidfile.unlink()
+                return True
+    return False
+
+
 def ensure_tailer(store: Store, sid: str, transcript_path: Path | str | None = None,
                   harness: str | None = None) -> str:
     """`running` | `spawned` | `failed` | `off` — never raises, never waits.
@@ -2015,6 +2068,13 @@ def ensure_tailer(store: Store, sid: str, transcript_path: Path | str | None = N
         if _marker(store, "room-gone").exists():
             return "failed"
         pidfile = _pidfile(store, sid)
+        crashed = _marker(store, f"daemon-failed-{sid}")
+        if _recent_crash(pidfile, crashed):
+            # The last daemon exited within a minute of starting. Respawning it
+            # every tick -- every prompt, every `colab` command, every 30 s of
+            # discovery -- is a storm of processes that all die the same way;
+            # the hooks' bounded flush carries the stream until the marker ages.
+            return "failed"
         if not _claim_pidfile(pidfile):
             return "running"
     except Exception:
@@ -2030,7 +2090,7 @@ def ensure_tailer(store: Store, sid: str, transcript_path: Path | str | None = N
             cmd += ["--transcript", str(transcript_path)]
         if harness:
             cmd += ["--harness", harness]
-        env = {**os.environ, "AGENTCOLAB_PROFILE": store.profile}
+        env = child_env(store)
         extra: dict[str, Any] = {}
         if os.name == "nt":
             extra["creationflags"] = (getattr(subprocess, "DETACHED_PROCESS", 0)

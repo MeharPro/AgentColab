@@ -173,8 +173,7 @@ def sign(payload: dict[str, Any], repo_root: Path | None = None) -> dict[str, An
         args.append("-U")
     try:
         proc = subprocess.run(
-            args, input=canonical(payload), capture_output=True, timeout=15,
-        )
+            args, input=canonical(payload), capture_output=True, timeout=15, **records.quiet_child())
     except (OSError, subprocess.SubprocessError):
         return payload
     if proc.returncode != 0 or not proc.stdout:
@@ -252,8 +251,7 @@ def verify(payload: dict[str, Any], allowed: dict[str, list[str]]) -> tuple[bool
             proc = subprocess.run(
                 ["ssh-keygen", "-Y", "verify", "-f", str(signers), "-I", principal,
                  "-n", NAMESPACE, "-s", str(sig_path)],
-                input=canonical(payload), capture_output=True, timeout=15,
-            )
+                input=canonical(payload), capture_output=True, timeout=15, **records.quiet_child())
         except (OSError, subprocess.SubprocessError):
             return False, ""
     return proc.returncode == 0, principal

@@ -222,7 +222,7 @@ def start_session(store: Store, message: dict[str, Any], config: dict[str, Any],
         directory = _log_dir(store)
         _prune_logs(directory)
         log = directory / f"{ident}.log"
-        env = {**os.environ, "AGENTCOLAB_PROFILE": store.profile, "AGENTCOLAB_WAKE": ident}
+        env = canvas.child_env(store, AGENTCOLAB_WAKE=ident)
         extra: dict[str, Any] = {}
         if os.name == "nt":
             extra["creationflags"] = (getattr(subprocess, "DETACHED_PROCESS", 0)
@@ -232,7 +232,8 @@ def start_session(store: Store, message: dict[str, Any], config: dict[str, Any],
         with open(log, "wb") as handle:
             handle.write(f"# {iso()} {shown}\n".encode("utf-8"))
             child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=handle, stderr=handle,
-                                     close_fds=True, cwd=str(store.repo_root), env=env, **extra)
+                                     close_fds=True, cwd=str(store.repo_root), env=env,
+                                     **{**records.quiet_child(), **extra})
         # Kept so a finished session is reaped and a running one is not
         # complained about when its handle is collected; nothing waits on it.
         _CHILDREN[:] = [c for c in _CHILDREN if c.poll() is None] + [child]
@@ -463,7 +464,7 @@ def ensure_listener(store: Store) -> str:
                 log.write_text("", encoding="utf-8")
         with contextlib.suppress(OSError):
             canvas._marker(store, canvas.WAKE_STOP).unlink()
-        env = {**os.environ, "AGENTCOLAB_PROFILE": store.profile}
+        env = canvas.child_env(store)
         extra: dict[str, Any] = {}
         if os.name == "nt":
             extra["creationflags"] = (getattr(subprocess, "DETACHED_PROCESS", 0)
@@ -546,7 +547,7 @@ def install_login_item(store: Store) -> list[str]:
         command = ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(path)]
         loaded = False
         with contextlib.suppress(Exception):
-            loaded = subprocess.run(command, capture_output=True, timeout=10).returncode == 0
+            loaded = subprocess.run(command, capture_output=True, timeout=10, **records.quiet_child()).returncode == 0
         return [f"login item  {path}",
                 "            loaded" if loaded else f"            load it with: {' '.join(command)}"]
     if system == "Linux" and path is not None:
@@ -560,8 +561,8 @@ def install_login_item(store: Store) -> list[str]:
         command = ["systemctl", "--user", "enable", "--now", path.name]
         enabled = False
         with contextlib.suppress(Exception):
-            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, timeout=10)
-            enabled = subprocess.run(command, capture_output=True, timeout=10).returncode == 0
+            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, timeout=10, **records.quiet_child())
+            enabled = subprocess.run(command, capture_output=True, timeout=10, **records.quiet_child()).returncode == 0
         return [f"login item  {path}",
                 "            enabled" if enabled else f"            enable it with: {' '.join(command)}"]
     task = " ".join(_shell_quote(a) for a in argv)

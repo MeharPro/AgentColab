@@ -1134,6 +1134,25 @@ class Daemon(RelayCase):
             return None
         return [sys.executable, "-m", "agentcolab.canvas"]
 
+    def test_a_child_can_import_the_package_from_another_checkout(self):
+        """The daemon runs in the joined checkout, which is almost never this repo.
+
+        A git-clone install (the installer's layout) is importable only through
+        the launcher's sys.path fix-up, so `python -m agentcolab` in a friend's
+        repository died with "No module named agentcolab" -- silently, in a log
+        nobody reads -- and their window stayed empty. child_env carries the
+        package's parent on PYTHONPATH for every detached child.
+        """
+        elsewhere = Path(tempfile.mkdtemp(prefix="elsewhere-"))
+        self.addCleanup(shutil.rmtree, elsewhere, True)
+        env = canvas.child_env(self.store)
+        self.assertIn(canvas.PACKAGE_PARENT, env["PYTHONPATH"].split(os.pathsep))
+        self.assertEqual(env["AGENTCOLAB_PROFILE"], self.store.profile)
+        probe = subprocess.run([sys.executable, "-m", "agentcolab", "--version"], cwd=str(elsewhere),
+                               env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        self.assertIn("AgentColab", probe.stdout)
+
     def test_spawn_returns_fast_leaves_a_live_child_and_the_child_obeys_paused(self):
         argv = self._tail_argv()
         patch = f"canvas.TAIL_ARGV = {argv!r} + ['tail']\n" if argv else ""
@@ -1416,8 +1435,13 @@ class Structural(unittest.TestCase):
     def test_the_spawn_is_detached_and_quiet(self):
         body = self.source[self.source.index("def ensure_tailer("):self.source.index("def _lane_of(")]
         for needle in ("stdin=subprocess.DEVNULL", "stdout=subprocess.DEVNULL", "start_new_session",
-                       "close_fds=True", "AGENTCOLAB_PROFILE", "creationflags"):
+                       "close_fds=True", "child_env(store)", "creationflags"):
             self.assertIn(needle, body)
+        # The profile and the import path ride in child_env, so both spawns
+        # (tailer here, listener in wake.py) get them from one place.
+        env_body = self.source[self.source.index("def child_env("):self.source.index("def markers_dir(")]
+        self.assertIn("AGENTCOLAB_PROFILE", env_body)
+        self.assertIn("PYTHONPATH", env_body)
 
     def test_the_hot_path_and_the_new_modules_stay_clean(self):
         hooks_src = (ROOT / "agentcolab" / "hooks.py").read_text(encoding="utf-8")
